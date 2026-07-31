@@ -120,6 +120,16 @@ function sessionTimestampFromFilename(filename) {
   return Number.isNaN(dt.getTime()) ? null : dt.getTime();
 }
 
+const WEEKDAY_LABELS = ["日", "月", "火", "水", "木", "金", "土"];
+
+// タイムスタンプ(ms)から「月」「火」のような曜日ラベルを返す。取得できない場合はnull
+function weekdayLabelFromTimestamp(ts) {
+  if (ts === null || ts === undefined) return null;
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return null;
+  return WEEKDAY_LABELS[d.getDay()];
+}
+
 // ---------- CSVパース（列検出＋PRRによる自動区間のみ。行の絞り込みはderiveで行う） ----------
 
 function parseCsvBase(text, filename) {
@@ -167,6 +177,7 @@ function parseCsvBase(text, filename) {
     filename,
     shortLabel: shortLabelFromFilename(filename),
     sessionTimestamp: sessionTimestampFromFilename(filename),
+    weekdayLabel: weekdayLabelFromTimestamp(sessionTimestampFromFilename(filename)),
     header,
     filteredRows,
     excludedCount,
@@ -260,6 +271,17 @@ function computeDerived(base) {
       diaBpChanged,
     };
   });
+
+  // ΔBVの50区間移動平均（末尾50点の単純移動平均、データが50点未満の区間はその時点までの平均）
+  const MA_WINDOW = 50;
+  if (hasDbv) {
+    for (let i = 0; i < rows.length; i++) {
+      const start = Math.max(0, i - MA_WINDOW + 1);
+      let sum = 0;
+      for (let j = start; j <= i; j++) sum += rows[j].dbvPercent;
+      rows[i].dbvMA50 = sum / (i - start + 1);
+    }
+  }
 
   const first = rows[0];
   const last = rows[rows.length - 1];
@@ -402,7 +424,7 @@ export default function BVPRRAnalyzerApp() {
   const [isDragging, setIsDragging] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [viewMode, setViewMode] = useState("single"); // "single" | "compare"
-  const [chartOrder, setChartOrder] = useState(["triLine", "dbvPrr", "uf", "bp", "ufPrrScatter", "triple"]);
+  const [chartOrder, setChartOrder] = useState(["triLine", "dbvMA", "uf", "bp", "triple"]);
   const dragIdRef = useRef(null);
 
   const handleChartDragStart = (id) => (e) => {
@@ -501,11 +523,6 @@ export default function BVPRRAnalyzerApp() {
   const active = results.find((r) => r.id === activeId);
   const activeBase = bases.find((b) => b.id === activeId);
 
-  const ufPrrScatterData = useMemo(() => {
-    if (!active || !active.hasUf) return [];
-    return active.rows.map((r) => ({ x: r.ufSpeedLh, y: r.prrInstant }));
-  }, [active]);
-
   const tripleScatterData = useMemo(() => {
     if (!active || !active.hasDbv || !active.hasUf) return [];
     return active.rows.map((r) => ({ x: r.dbvPercent, y: r.prrInstant, z: r.ufSpeedLh }));
@@ -536,6 +553,20 @@ export default function BVPRRAnalyzerApp() {
     [results]
   );
 
+  const [overallSheet, setOverallSheet] = useState("all"); // "all" | "月" | "火" | ...
+
+  // データに実際に登場する曜日を、月→日の順で並べる
+  const presentWeekdays = useMemo(() => {
+    const order = ["月", "火", "水", "木", "金", "土", "日"];
+    const present = new Set(chronoResults.map((r) => r.weekdayLabel).filter(Boolean));
+    return order.filter((w) => present.has(w));
+  }, [chronoResults]);
+
+  const sheetResults = useMemo(() => {
+    if (overallSheet === "all") return chronoResults;
+    return chronoResults.filter((r) => r.weekdayLabel === overallSheet);
+  }, [chronoResults, overallSheet]);
+
   const [aiStatus, setAiStatus] = useState("idle"); // "idle" | "loading" | "done" | "error"
   const [aiResult, setAiResult] = useState(null); // { status, issues, improvements }
   const [aiErrorMsg, setAiErrorMsg] = useState("");
@@ -544,7 +575,7 @@ export default function BVPRRAnalyzerApp() {
     setAiStatus("loading");
     setAiErrorMsg("");
     try {
-      const sessionsForPrompt = chronoResults.map((r) => ({
+      const sessionsForPrompt = sheetResults.map((r) => ({
         セッション: r.shortLabel,
         PRR積算量合計_L: Number(r.totalPrrVolumeL.toFixed(4)),
         最大ΔBV低下率: r.hasDbv ? Number(r.minDbv.toFixed(1)) : null,
@@ -638,7 +669,7 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
       setAiErrorMsg(`AI分析の実行中にエラーが発生しました: ${e.message || e}（時間をおいて再度お試しください）`);
       setAiStatus("error");
     }
-  }, [chronoResults]);
+  }, [sheetResults]);
 
   return (
     <div
@@ -1032,7 +1063,7 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
                             gap: 4,
                           }}
                         >
-                          <Droplet size={11} /> ΔBV (%)
+                          <Droplet size={11} /> ΔBV 移動平均(50区間, %)
                         </div>
                         <div
                           style={{
@@ -1093,7 +1124,7 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
                           }}
                           labelFormatter={(v) => `${v} 分`}
                           formatter={(value, name) => {
-                            if (name === "ΔBV(%)") return [`${value.toFixed(1)}%`, "ΔBV"];
+                            if (name === "ΔBV移動平均(50区間,%)") return [`${value.toFixed(2)}%`, "ΔBV移動平均"];
                             if (name === "PRR瞬時値[L/h]") return [value.toFixed(3), "PRR瞬時値"];
                             return [`${value.toFixed(2)} L/h`, "除水速度"];
                           }}
@@ -1101,8 +1132,8 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
                         <Line
                           yAxisId="dbv"
                           type="monotone"
-                          dataKey="dbvPercent"
-                          name="ΔBV(%)"
+                          dataKey="dbvMA50"
+                          name="ΔBV移動平均(50区間,%)"
                           stroke="#F59E0B"
                           strokeWidth={1.6}
                           dot={false}
@@ -1132,17 +1163,17 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
                       </LineChart>
                     </ResponsiveContainer>
                     <div style={{ fontSize: 10, color: "#4A5670", marginTop: 4, paddingLeft: 6 }}>
-                      ※ 除水速度は左右軸とは別スケール(非表示軸)で重ねて表示しています。形状の連動をご覧ください
+                      ※ ΔBVは50区間移動平均、除水速度は左右軸とは別スケール(非表示軸)で重ねて表示しています。形状の連動をご覧ください
                     </div>
                   </div>
                 )}
 
-                {/* 推移チャート（dBV% と PRR瞬時値 を2軸表示） */}
+                {/* ΔBV 移動平均(50区間)チャート */}
                 {active.hasDbv && (
                   <div
-                    {...dragTargetProps("dbvPrr")}
+                    {...dragTargetProps("dbvMA")}
                     style={{
-                      order: chartOrder.indexOf("dbvPrr"),
+                      order: chartOrder.indexOf("dbvMA"),
                       background: "#050B14",
                       border: "1px solid #1B2536",
                       borderRadius: 12,
@@ -1152,14 +1183,8 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
                     }}
                   >
                     <div
-                      {...dragSourceProps("dbvPrr")}
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        gap: 6,
-                        cursor: "grab",
-                        marginBottom: 6,
-                      }}
+                      {...dragSourceProps("dbvMA")}
+                      style={{ display: "flex", alignItems: "center", gap: 6, cursor: "grab", marginBottom: 6 }}
                     >
                       <GripVertical size={13} color="#4A5670" />
                       <span style={{ fontSize: 10, color: "#4A5670" }}>ドラッグで並び替え</span>
@@ -1173,58 +1198,32 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
                         paddingLeft: 6,
                       }}
                     >
-                      <div style={{ display: "flex", gap: 14 }}>
-                        <div
-                          style={{
-                            fontSize: 11.5,
-                            color: "#F59E0B",
-                            fontFamily: "'IBM Plex Mono',monospace",
-                            display: "flex",
-                            alignItems: "center",
-                            gap: 4,
-                          }}
-                        >
-                          <Droplet size={11} /> ΔBV (%)
-                        </div>
-                        <div
-                          style={{
-                            fontSize: 11.5,
-                            color: "#5EEAD4",
-                            fontFamily: "'IBM Plex Mono',monospace",
-                            display: "flex",
-                            alignItems: "center",
-                            gap: 4,
-                          }}
-                        >
-                          <TrendingDown size={11} /> PRR 瞬時値 (L/h)
-                        </div>
+                      <div
+                        style={{
+                          fontSize: 11.5,
+                          color: "#F59E0B",
+                          fontFamily: "'IBM Plex Mono',monospace",
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 4,
+                        }}
+                      >
+                        <Droplet size={11} /> ΔBV 移動平均(50区間, %)
                       </div>
                       <div style={{ fontSize: 11, color: "#3F4C63" }}>治療経過時間 (分)</div>
                     </div>
-                    <ResponsiveContainer width="100%" height={280}>
+                    <ResponsiveContainer width="100%" height={240}>
                       <LineChart data={active.rows} margin={{ top: 4, right: 14, left: -8, bottom: 4 }}>
                         <CartesianGrid stroke="#152036" strokeDasharray="2 4" vertical={false} />
                         <XAxis
                           dataKey="treatTimeMin"
-                          tick={{ fill: "#4A5670", fontSize: 10.5 }}
+                          tick={{ fill: "#8B9CB3", fontSize: 10.5 }}
                           tickFormatter={monitorTick}
                           stroke="#1B2536"
                           minTickGap={40}
                         />
-                        <YAxis
-                          yAxisId="dbv"
-                          tick={{ fill: "#4A5670", fontSize: 10.5 }}
-                          stroke="#1B2536"
-                          width={44}
-                        />
-                        <YAxis
-                          yAxisId="prr"
-                          orientation="right"
-                          tick={{ fill: "#4A5670", fontSize: 10.5 }}
-                          stroke="#1B2536"
-                          width={44}
-                        />
-                        <ReferenceLine y={0} yAxisId="dbv" stroke="#2A3548" />
+                        <YAxis tick={{ fill: "#8B9CB3", fontSize: 10.5 }} stroke="#1B2536" width={44} />
+                        <ReferenceLine y={0} stroke="#2A3548" />
                         <Tooltip
                           contentStyle={{
                             background: "#0F1826",
@@ -1233,30 +1232,21 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
                             fontSize: 12,
                           }}
                           labelFormatter={(v) => `${v} 分`}
-                          formatter={(v, name) =>
-                            name === "dbvPercent" ? [`${v.toFixed(1)}%`, "ΔBV"] : [v.toFixed(3), "PRR瞬時値[L/h]"]
-                          }
+                          formatter={(v) => [`${v.toFixed(2)}%`, "ΔBV移動平均(50区間)"]}
                         />
                         <Line
-                          yAxisId="dbv"
                           type="monotone"
-                          dataKey="dbvPercent"
+                          dataKey="dbvMA50"
                           stroke="#F59E0B"
-                          strokeWidth={1.6}
-                          dot={false}
-                          isAnimationActive={false}
-                        />
-                        <Line
-                          yAxisId="prr"
-                          type="monotone"
-                          dataKey="prrInstant"
-                          stroke="#2DD4BF"
-                          strokeWidth={1.6}
+                          strokeWidth={1.8}
                           dot={false}
                           isAnimationActive={false}
                         />
                       </LineChart>
                     </ResponsiveContainer>
+                    <div style={{ fontSize: 10, color: "#4A5670", marginTop: 4, paddingLeft: 6 }}>
+                      ※ 各点は直近50サンプル(約16.7分)の単純移動平均です。冒頭付近はデータ数がまだ50点未満のため、その時点までの平均になっています
+                    </div>
                   </div>
                 )}
 
@@ -1435,76 +1425,6 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
                   </div>
                 )}
 
-                {/* 除水速度-PRR 相関散布図 */}
-                {active.hasUf && (
-                  <div
-                    {...dragTargetProps("ufPrrScatter")}
-                    style={{
-                      order: chartOrder.indexOf("ufPrrScatter"),
-                      background: "#0F1826",
-                      border: "1px solid #202B3D",
-                      borderRadius: 12,
-                      padding: "16px 14px",
-                      marginBottom: 18,
-                    }}
-                  >
-                    <div
-                      {...dragSourceProps("ufPrrScatter")}
-                      style={{ display: "flex", alignItems: "center", gap: 6, cursor: "grab", marginBottom: 6 }}
-                    >
-                      <GripVertical size={13} color="#4A5670" />
-                      <span style={{ fontSize: 10, color: "#4A5670" }}>ドラッグで並び替え</span>
-                    </div>
-                    <div style={{ fontSize: 12, color: "#8B9CB3", marginBottom: 8 }}>
-                      除水速度[L/h] と PRR瞬時値[L/h] の相関
-                    </div>
-                    <ResponsiveContainer width="100%" height={220}>
-                      <ScatterChart margin={{ top: 4, right: 16, left: -6, bottom: 4 }}>
-                        <CartesianGrid stroke="#1B2536" strokeDasharray="2 4" />
-                        <XAxis
-                          type="number"
-                          dataKey="x"
-                          name="除水速度[L/h]"
-                          tick={{ fill: "#8B9CB3", fontSize: 10.5 }}
-                          stroke="#1B2536"
-                          domain={["dataMin", "dataMax"]}
-                          label={{
-                            value: "除水速度(L/h)",
-                            position: "insideBottom",
-                            fill: "#CBD5E1",
-                            fontSize: 11,
-                            offset: -2,
-                          }}
-                        />
-                        <YAxis
-                          type="number"
-                          dataKey="y"
-                          name="PRR瞬時値[L/h]"
-                          tick={{ fill: "#8B9CB3", fontSize: 10.5 }}
-                          stroke="#1B2536"
-                          domain={["dataMin", "dataMax"]}
-                          width={44}
-                        />
-                        <Tooltip
-                          cursor={{ strokeDasharray: "3 3" }}
-                          contentStyle={{
-                            background: "#0F1826",
-                            border: "1px solid #2A3548",
-                            borderRadius: 8,
-                            fontSize: 12,
-                          }}
-                          formatter={(value, name, props) =>
-                            props && props.dataKey === "x"
-                              ? [`${value.toFixed(2)} L/h`, "除水速度"]
-                              : [value.toFixed(3), "PRR瞬時値[L/h]"]
-                          }
-                        />
-                        <Scatter data={ufPrrScatterData} fill="#818CF8" fillOpacity={0.55} r={2.4} />
-                      </ScatterChart>
-                    </ResponsiveContainer>
-                  </div>
-                )}
-
                 {/* ΔBV・PRR・除水速度 3変数バブルチャート */}
                 {active.hasDbv && active.hasUf && (
                   <div
@@ -1604,6 +1524,35 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
 
         {results.length > 1 && viewMode === "compare" && (
           <div style={{ marginTop: 20 }}>
+            {/* 曜日別シート切り替え */}
+            {presentWeekdays.length > 1 && (
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 16 }}>
+                {[["all", "全体"], ...presentWeekdays.map((w) => [w, `${w}曜日`])].map(([key, label]) => (
+                  <button
+                    key={key}
+                    onClick={() => {
+                      setOverallSheet(key);
+                      setAiStatus("idle");
+                      setAiResult(null);
+                      setAiErrorMsg("");
+                    }}
+                    style={{
+                      padding: "6px 12px",
+                      borderRadius: 7,
+                      fontSize: 12,
+                      fontWeight: 500,
+                      cursor: "pointer",
+                      border: overallSheet === key ? "1px solid rgba(129,140,248,0.5)" : "1px solid #202B3D",
+                      background: overallSheet === key ? "rgba(129,140,248,0.14)" : "#0F1826",
+                      color: overallSheet === key ? "#A5B4FC" : "#8B9CB3",
+                    }}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            )}
+
             {/* 比較サマリー表 */}
             <div
               style={{
@@ -1629,7 +1578,7 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
                   </tr>
                 </thead>
                 <tbody>
-                  {results.map((r, i) => (
+                  {sheetResults.map((r, i) => (
                     <tr key={r.id} style={{ borderTop: "1px solid #1B2536" }}>
                       <td style={{ padding: "8px 10px", display: "flex", alignItems: "center", gap: 8 }}>
                         <span
@@ -1678,7 +1627,7 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
             </div>
 
             {/* ΔBV 重ね合わせグラフ */}
-            {results.some((r) => r.hasDbv) && (
+            {sheetResults.some((r) => r.hasDbv) && (
               <div
                 style={{
                   background: "#050B14",
@@ -1710,7 +1659,7 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
                       labelFormatter={(v) => `${v} 分`}
                       formatter={(v) => [`${v.toFixed(1)}%`, "ΔBV"]}
                     />
-                    {results
+                    {sheetResults
                       .filter((r) => r.hasDbv)
                       .map((r, i) => (
                         <Line
@@ -1718,7 +1667,7 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
                           data={r.rows}
                           dataKey="dbvPercent"
                           name={r.shortLabel}
-                          stroke={colorFor(results.indexOf(r))}
+                          stroke={colorFor(sheetResults.indexOf(r))}
                           strokeWidth={1.5}
                           dot={false}
                           isAnimationActive={false}
@@ -1761,7 +1710,7 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
                     labelFormatter={(v) => `${v} 分`}
                     formatter={(v) => [v.toFixed(3), "PRR瞬時値[L/h]"]}
                   />
-                  {results.map((r, i) => (
+                  {sheetResults.map((r, i) => (
                     <Line
                       key={r.id}
                       data={r.rows}
@@ -1778,7 +1727,7 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
             </div>
 
             {/* 除水速度 重ね合わせグラフ */}
-            {results.some((r) => r.hasUf) && (
+            {sheetResults.some((r) => r.hasUf) && (
               <div
                 style={{
                   background: "#050B14",
@@ -1809,7 +1758,7 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
                       labelFormatter={(v) => `${v} 分`}
                       formatter={(v) => [`${v.toFixed(2)} L/h`, "除水速度"]}
                     />
-                    {results
+                    {sheetResults
                       .filter((r) => r.hasUf)
                       .map((r) => (
                         <Line
@@ -1817,7 +1766,7 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
                           data={r.rows}
                           dataKey="ufSpeedLh"
                           name={r.shortLabel}
-                          stroke={colorFor(results.indexOf(r))}
+                          stroke={colorFor(sheetResults.indexOf(r))}
                           strokeWidth={1.5}
                           dot={false}
                           isAnimationActive={false}
@@ -1832,6 +1781,35 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
 
         {results.length > 1 && viewMode === "overall" && (
           <div style={{ marginTop: 20 }}>
+            {/* 曜日別シート切り替え（週3回透析など、曜日ごとに傾向を見たい場合用） */}
+            {presentWeekdays.length > 1 && (
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 16 }}>
+                {[["all", "全体"], ...presentWeekdays.map((w) => [w, `${w}曜日`])].map(([key, label]) => (
+                  <button
+                    key={key}
+                    onClick={() => {
+                      setOverallSheet(key);
+                      setAiStatus("idle");
+                      setAiResult(null);
+                      setAiErrorMsg("");
+                    }}
+                    style={{
+                      padding: "6px 12px",
+                      borderRadius: 7,
+                      fontSize: 12,
+                      fontWeight: 500,
+                      cursor: "pointer",
+                      border: overallSheet === key ? "1px solid rgba(129,140,248,0.5)" : "1px solid #202B3D",
+                      background: overallSheet === key ? "rgba(129,140,248,0.14)" : "#0F1826",
+                      color: overallSheet === key ? "#A5B4FC" : "#8B9CB3",
+                    }}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            )}
+
             {/* AI総合分析 */}
             <div
               style={{
@@ -1849,7 +1827,9 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
                     AI総合分析
                   </div>
                   <div style={{ fontSize: 11.5, color: "#8B9CB3", marginTop: 2 }}>
-                    読み込んだ{results.length}件のセッションから、現在の状態・課題・改善策をAIがまとめます
+                    {overallSheet === "all"
+                      ? `読み込んだ${sheetResults.length}件のセッションから、現在の状態・課題・改善策をAIがまとめます`
+                      : `${overallSheet}曜日の${sheetResults.length}件のセッションから、現在の状態・課題・改善策をAIがまとめます`}
                   </div>
                 </div>
                 <button
@@ -1938,9 +1918,9 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
             </div>
 
             {(() => {
-              const ufSessions = chronoResults.filter((r) => r.hasUf);
-              const bpSessions = chronoResults.filter((r) => r.hasBp);
-              const dbvSessions = chronoResults.filter((r) => r.hasDbv);
+              const ufSessions = sheetResults.filter((r) => r.hasUf);
+              const bpSessions = sheetResults.filter((r) => r.hasBp);
+              const dbvSessions = sheetResults.filter((r) => r.hasDbv);
               const corrSessions = dbvSessions.filter((r) => r.corrDbvPrr !== null);
 
               const avg = (arr) => (arr.length ? arr.reduce((s, v) => s + v, 0) / arr.length : null);
@@ -1961,7 +1941,10 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
                     }}
                   >
                     {[
-                      ["読み込みセッション数", `${results.length} 件`],
+                      [
+                        overallSheet === "all" ? "読み込みセッション数" : `${overallSheet}曜日のセッション数`,
+                        `${sheetResults.length} 件`,
+                      ],
                       ...(avgUf !== null ? [["平均総除水量", `${avgUf.toFixed(2)} L`]] : []),
                       ...(avgSysDrop !== null ? [["平均血圧低下(収縮期)", `${avgSysDrop.toFixed(1)} mmHg`]] : []),
                       ...(avgMinDbv !== null ? [["平均最大ΔBV低下", `${avgMinDbv.toFixed(1)}%`]] : []),
@@ -2010,7 +1993,7 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
                         PRR積算量合計(L)の推移
                       </div>
                       <ResponsiveContainer width="100%" height={180}>
-                        <BarChart data={chronoResults} margin={{ top: 4, right: 10, left: -18, bottom: 4 }}>
+                        <BarChart data={sheetResults} margin={{ top: 4, right: 10, left: -18, bottom: 4 }}>
                           <CartesianGrid stroke="#152036" strokeDasharray="2 4" vertical={false} />
                           <XAxis dataKey="shortLabel" tick={{ fill: "#8B9CB3", fontSize: 9.5 }} stroke="#1B2536" />
                           <YAxis tick={{ fill: "#8B9CB3", fontSize: 10 }} stroke="#1B2536" width={40} />
