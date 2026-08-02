@@ -371,9 +371,30 @@ function computeDerived(base) {
   };
 }
 
-// ---------- CSVダウンロード ----------
+// ---------- Excelダウンロード（SpreadsheetML、外部ライブラリ不使用） ----------
 
-function downloadCsv(filename, derived) {
+function escapeXml(str) {
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+function xmlCell(value) {
+  if (value === null || value === undefined || value === "") return "<Cell/>";
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return `<Cell><Data ss:Type="Number">${value}</Data></Cell>`;
+  }
+  return `<Cell><Data ss:Type="String">${escapeXml(value)}</Data></Cell>`;
+}
+
+function xmlRow(values) {
+  return `<Row>${values.map(xmlCell).join("")}</Row>`;
+}
+
+function downloadExcel(filename, derived) {
   const header = [
     "hour",
     "min",
@@ -388,10 +409,10 @@ function downloadCsv(filename, derived) {
     "収縮期血圧[mmHg]",
     "拡張期血圧[mmHg]",
   ];
-  const lines = [header.join(",")];
+  const rowsXml = [xmlRow(header)];
   derived.rows.forEach((r) => {
-    lines.push(
-      [
+    rowsXml.push(
+      xmlRow([
         r.hour,
         r.min,
         r.sec,
@@ -399,20 +420,31 @@ function downloadCsv(filename, derived) {
         r.raw,
         r.prrInstant,
         r.prrIntervalVolumeL,
-        r.dbvPercent ?? "",
-        r.ufSpeedLh ?? "",
-        r.ufVolumeL ?? "",
-        r.sysBp ?? "",
-        r.diaBp ?? "",
-      ].join(",")
+        r.dbvPercent,
+        r.ufSpeedLh,
+        r.ufVolumeL,
+        r.sysBp,
+        r.diaBp,
+      ])
     );
   });
-  const csvContent = "\uFEFF" + lines.join("\r\n");
-  const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<?mso-application progid="Excel.Sheet"?>
+<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"
+ xmlns:o="urn:schemas-microsoft-com:office:office"
+ xmlns:x="urn:schemas-microsoft-com:office:excel"
+ xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">
+ <Worksheet ss:Name="BV_PRR\u5206\u6790">
+  <Table>
+${rowsXml.join("\n")}
+  </Table>
+ </Worksheet>
+</Workbook>`;
+  const blob = new Blob([xml], { type: "application/vnd.ms-excel;charset=utf-8;" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = filename.replace(/\.csv$/i, "") + "_BV_PRR分析.csv";
+  a.download = filename.replace(/\.csv$/i, "") + "_BV_PRR分析.xls";
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
@@ -1582,7 +1614,7 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
 
                 {/* ダウンロード */}
                 <button
-                  onClick={() => downloadCsv(active.filename, active)}
+                  onClick={() => downloadExcel(active.filename, active)}
                   style={{
                     order: 100,
                     display: "flex",
@@ -1599,7 +1631,7 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
                   }}
                 >
                   <Download size={15} />
-                  抽出済みCSV(BV+PRR)をダウンロード
+                  抽出済みデータ(BV+PRR)をExcelでダウンロード
                 </button>
               </div>
             )}
