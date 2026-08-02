@@ -424,7 +424,7 @@ export default function BVPRRAnalyzerApp() {
   const [isDragging, setIsDragging] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [viewMode, setViewMode] = useState("single"); // "single" | "compare"
-  const [chartOrder, setChartOrder] = useState(["triLine", "dbvMA", "uf", "bp", "triple"]);
+  const [chartOrder, setChartOrder] = useState(["triLine", "uf", "bp", "triple"]);
   const dragIdRef = useRef(null);
 
   const handleChartDragStart = (id) => (e) => {
@@ -1164,88 +1164,6 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
                     </ResponsiveContainer>
                     <div style={{ fontSize: 10, color: "#4A5670", marginTop: 4, paddingLeft: 6 }}>
                       ※ ΔBVは50区間移動平均、除水速度は左右軸とは別スケール(非表示軸)で重ねて表示しています。形状の連動をご覧ください
-                    </div>
-                  </div>
-                )}
-
-                {/* ΔBV 移動平均(50区間)チャート */}
-                {active.hasDbv && (
-                  <div
-                    {...dragTargetProps("dbvMA")}
-                    style={{
-                      order: chartOrder.indexOf("dbvMA"),
-                      background: "#050B14",
-                      border: "1px solid #1B2536",
-                      borderRadius: 12,
-                      padding: "18px 14px 6px",
-                      boxShadow: "inset 0 0 40px rgba(15,118,110,0.08)",
-                      marginBottom: 18,
-                    }}
-                  >
-                    <div
-                      {...dragSourceProps("dbvMA")}
-                      style={{ display: "flex", alignItems: "center", gap: 6, cursor: "grab", marginBottom: 6 }}
-                    >
-                      <GripVertical size={13} color="#4A5670" />
-                      <span style={{ fontSize: 10, color: "#4A5670" }}>ドラッグで並び替え</span>
-                    </div>
-                    <div
-                      style={{
-                        display: "flex",
-                        justifyContent: "space-between",
-                        alignItems: "center",
-                        marginBottom: 4,
-                        paddingLeft: 6,
-                      }}
-                    >
-                      <div
-                        style={{
-                          fontSize: 11.5,
-                          color: "#F59E0B",
-                          fontFamily: "'IBM Plex Mono',monospace",
-                          display: "flex",
-                          alignItems: "center",
-                          gap: 4,
-                        }}
-                      >
-                        <Droplet size={11} /> ΔBV 移動平均(50区間, %)
-                      </div>
-                      <div style={{ fontSize: 11, color: "#3F4C63" }}>治療経過時間 (分)</div>
-                    </div>
-                    <ResponsiveContainer width="100%" height={240}>
-                      <LineChart data={active.rows} margin={{ top: 4, right: 14, left: -8, bottom: 4 }}>
-                        <CartesianGrid stroke="#152036" strokeDasharray="2 4" vertical={false} />
-                        <XAxis
-                          dataKey="treatTimeMin"
-                          tick={{ fill: "#8B9CB3", fontSize: 10.5 }}
-                          tickFormatter={monitorTick}
-                          stroke="#1B2536"
-                          minTickGap={40}
-                        />
-                        <YAxis tick={{ fill: "#8B9CB3", fontSize: 10.5 }} stroke="#1B2536" width={44} />
-                        <ReferenceLine y={0} stroke="#2A3548" />
-                        <Tooltip
-                          contentStyle={{
-                            background: "#0F1826",
-                            border: "1px solid #2A3548",
-                            borderRadius: 8,
-                            fontSize: 12,
-                          }}
-                          labelFormatter={(v) => `${v} 分`}
-                          formatter={(v) => [`${v.toFixed(2)}%`, "ΔBV移動平均(50区間)"]}
-                        />
-                        <Line
-                          type="monotone"
-                          dataKey="dbvMA50"
-                          stroke="#F59E0B"
-                          strokeWidth={1.8}
-                          dot={false}
-                          isAnimationActive={false}
-                        />
-                      </LineChart>
-                    </ResponsiveContainer>
-                    <div style={{ fontSize: 10, color: "#4A5670", marginTop: 4, paddingLeft: 6 }}>
-                      ※ 各点は直近50サンプル(約16.7分)の単純移動平均です。冒頭付近はデータ数がまだ50点未満のため、その時点までの平均になっています
                     </div>
                   </div>
                 )}
