@@ -26,6 +26,8 @@ import {
   TrendingDown,
   RotateCcw,
   GripVertical,
+  Copy,
+  Check,
 } from "lucide-react";
 
 // ---------- CSV / エンコーディング処理 ----------
@@ -582,29 +584,36 @@ export default function BVPRRAnalyzerApp() {
     return chronoResults.filter((r) => r.weekdayLabel === overallSheet);
   }, [chronoResults, overallSheet]);
 
-  const [aiStatus, setAiStatus] = useState("idle"); // "idle" | "loading" | "done" | "error"
-  const [aiResult, setAiResult] = useState(null); // { status, issues, improvements }
-  const [aiErrorMsg, setAiErrorMsg] = useState("");
+  const [generatedPrompt, setGeneratedPrompt] = useState(null);
+  const [copyStatus, setCopyStatus] = useState("idle"); // "idle" | "copied"
 
-  const runAiAnalysis = useCallback(async () => {
-    setAiStatus("loading");
-    setAiErrorMsg("");
-    try {
-      const sessionsForPrompt = sheetResults.map((r) => ({
-        セッション: r.shortLabel,
-        PRR積算量合計_L: Number(r.totalPrrVolumeL.toFixed(4)),
-        最大ΔBV低下率: r.hasDbv ? Number(r.minDbv.toFixed(1)) : null,
-        総除水量_L: r.hasUf ? Number(r.totalUfVolumeL.toFixed(2)) : null,
-        収縮期血圧低下量_mmHg: r.hasBp ? r.sysDrop : null,
-        ΔBVとPRRの相関係数: r.hasDbv ? r.corrDbvPrr : null,
-        除水速度とPRRの相関係数: r.hasUf ? r.corrUfPrr : null,
-      }));
+  const generateAnalysisPrompt = useCallback(() => {
+    const sessionsForPrompt = sheetResults.map((r) => ({
+      セッション: r.shortLabel,
+      PRR積算量合計_L: Number(r.totalPrrVolumeL.toFixed(4)),
+      最大ΔBV低下率: r.hasDbv ? Number(r.minDbv.toFixed(1)) : null,
+      総除水量_L: r.hasUf ? Number(r.totalUfVolumeL.toFixed(2)) : null,
+      収縮期血圧低下量_mmHg: r.hasBp ? r.sysDrop : null,
+      ΔBVとPRRの相関係数: r.hasDbv ? r.corrDbvPrr : null,
+      除水速度とPRRの相関係数: r.hasUf ? r.corrUfPrr : null,
+    }));
 
-      const prompt = `あなたは血液透析（除水・血漿再充填）の技術データをreviewする臨床工学の専門家です。
-以下は同一患者の複数回の透析セッションから抽出した数値データです（セッションは実施日時の昇順）。
-このデータだけをもとに、傾向・技術的な状態・注意点・改善の方向性を専門的にまとめてください。
-個々の値の正常/異常を医学的に断定せず、あくまで「データの傾向として読み取れること」として記述してください。
-診断や治療方針の決定はできない旨を踏まえつつ、臨床工学技士が次回の設定検討に使える実務的な視点で書いてください。
+    const prompt = `あなたは血液透析（除水・血漿再充填ダイナミクス）データを専門的にレビューする臨床工学技士です。
+以下は同一患者の複数回の透析セッションから抽出した数値データです（実施日時の昇順）。
+このデータのみをもとに、下記の観点から詳細かつ専門的に分析してください。
+
+【分析してほしい観点】
+1. PRR（血漿再充填）・ΔBV（血液濃縮）の全体的な傾向と、セッションを追うごとの経時的な変化
+2. セッション間のばらつきとその要因として考えられること
+3. 除水速度・除水量とΔBV/PRRの関係性から読み取れる血漿再充填能力の評価
+4. 血圧低下とΔBVの関連から示唆される循環動態への影響
+5. データ上、特に注意が必要と考えられるセッション・時間帯とその根拠
+6. 次回以降の透析条件設定（除水速度・除水プログラムなど）を検討する上での実務的な示唆
+
+【出力形式】
+- 見出し付きのMarkdown形式で、日本語で詳細に記述してください
+- 数値の正常/異常を医学的に断定せず、あくまで「データの傾向として読み取れること」として記述してください
+- 診断や治療方針の決定はできない旨を踏まえつつ、臨床工学技士が次回の設定検討に使える実務的な視点でまとめてください
 
 セッションデータ（JSON）:
 ${JSON.stringify(sessionsForPrompt, null, 2)}
@@ -613,78 +622,22 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
 - PRR積算量合計: 血漿再充填の推定量（治療中の合計、単位L）
 - 最大ΔBV低下率: 血液量減少の最大値（マイナスが大きいほど濃縮）
 - ΔBVとPRRの相関: 負の相関が強いほど、除水に対して血漿再充填が追いついていない可能性
-- 除水速度とPRRの相関: 除水速度の変化とPRRの連動性
+- 除水速度とPRRの相関: 除水速度の変化とPRRの連動性`;
 
-以下のJSON形式のみで出力してください。前置きや説明文、Markdownのコードフェンスは一切付けないでください。
-{
-  "status": "現在の状態についての要約(200字程度)",
-  "issues": ["課題1", "課題2", "課題3"],
-  "improvements": ["改善策1", "改善策2", "改善策3"]
-}`;
-
-      const callApi = async () => {
-        const response = await fetch("https://api.anthropic.com/v1/messages", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            model: "claude-sonnet-4-6",
-            max_tokens: 1000,
-            messages: [{ role: "user", content: prompt }],
-          }),
-        });
-        const rawBody = await response.text();
-        let data;
-        try {
-          data = JSON.parse(rawBody);
-        } catch (parseErr) {
-          throw new Error(`HTTP ${response.status}: ${rawBody.slice(0, 300)}`);
-        }
-        if (!response.ok) {
-          throw new Error(
-            `HTTP ${response.status} ${data?.error?.type || ""}: ${data?.error?.message || rawBody.slice(0, 300)}`
-          );
-        }
-        if (data.error) {
-          throw new Error(`${data.error.type || ""}: ${data.error.message || "APIエラーが発生しました"}`);
-        }
-        return data;
-      };
-
-      let data;
-      let lastErr;
-      for (let attempt = 0; attempt < 3; attempt++) {
-        try {
-          data = await callApi();
-          lastErr = null;
-          break;
-        } catch (err) {
-          lastErr = err;
-          if (attempt < 2) {
-            await new Promise((resolve) => setTimeout(resolve, 800 * (attempt + 1)));
-          }
-        }
-      }
-      if (lastErr) throw lastErr;
-
-      const textBlocks = (data.content || []).filter((b) => b.type === "text").map((b) => b.text);
-      const rawText = textBlocks.join("\n");
-      if (!rawText.trim()) {
-        throw new Error("AIから応答テキストが得られませんでした");
-      }
-      const cleaned = rawText.replace(/```json|```/g, "").trim();
-      const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) {
-        throw new Error("AIの応答をJSONとして解釈できませんでした");
-      }
-      const parsed = JSON.parse(jsonMatch[0]);
-      setAiResult(parsed);
-      setAiStatus("done");
-    } catch (e) {
-      console.error("AI analysis error:", e);
-      setAiErrorMsg(`AI分析の実行中にエラーが発生しました: ${e.message || e}（時間をおいて再度お試しください）`);
-      setAiStatus("error");
-    }
+    setGeneratedPrompt(prompt);
+    setCopyStatus("idle");
   }, [sheetResults]);
+
+  const copyPrompt = useCallback(async () => {
+    if (!generatedPrompt) return;
+    try {
+      await navigator.clipboard.writeText(generatedPrompt);
+      setCopyStatus("copied");
+      setTimeout(() => setCopyStatus("idle"), 2000);
+    } catch (e) {
+      console.error("Clipboard copy error:", e);
+    }
+  }, [generatedPrompt]);
 
   return (
     <div
@@ -1663,9 +1616,8 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
                     key={key}
                     onClick={() => {
                       setOverallSheet(key);
-                      setAiStatus("idle");
-                      setAiResult(null);
-                      setAiErrorMsg("");
+                      setGeneratedPrompt(null);
+                      setCopyStatus("idle");
                     }}
                     style={{
                       padding: "6px 12px",
@@ -1920,9 +1872,8 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
                     key={key}
                     onClick={() => {
                       setOverallSheet(key);
-                      setAiStatus("idle");
-                      setAiResult(null);
-                      setAiErrorMsg("");
+                      setGeneratedPrompt(null);
+                      setCopyStatus("idle");
                     }}
                     style={{
                       padding: "6px 12px",
@@ -1941,7 +1892,7 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
               </div>
             )}
 
-            {/* AI総合分析 */}
+            {/* AI総合分析用プロンプト生成 */}
             <div
               style={{
                 background: "linear-gradient(135deg, rgba(45,212,191,0.06), rgba(15,118,110,0.03))",
@@ -1955,96 +1906,84 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
                 <div>
                   <div style={{ fontSize: 13.5, fontWeight: 600, color: "#5EEAD4", display: "flex", alignItems: "center", gap: 6 }}>
                     <Activity size={15} />
-                    AI総合分析
+                    AI総合分析用プロンプト生成
                   </div>
                   <div style={{ fontSize: 11.5, color: "#8B9CB3", marginTop: 2 }}>
                     {overallSheet === "all"
-                      ? `読み込んだ${sheetResults.length}件のセッションから、現在の状態・課題・改善策をAIがまとめます`
-                      : `${overallSheet}曜日の${sheetResults.length}件のセッションから、現在の状態・課題・改善策をAIがまとめます`}
+                      ? `読み込んだ${sheetResults.length}件のセッションから、専門的な分析を依頼するプロンプトを自動生成します`
+                      : `${overallSheet}曜日の${sheetResults.length}件のセッションから、専門的な分析を依頼するプロンプトを自動生成します`}
                   </div>
                 </div>
                 <button
-                  onClick={runAiAnalysis}
-                  disabled={aiStatus === "loading"}
+                  onClick={generateAnalysisPrompt}
                   style={{
-                    background: aiStatus === "loading" ? "#1B2536" : "#0F766E",
+                    background: "#0F766E",
                     color: "#E7ECF3",
                     border: "none",
                     borderRadius: 9,
                     padding: "9px 16px",
                     fontSize: 12.5,
                     fontWeight: 500,
-                    cursor: aiStatus === "loading" ? "default" : "pointer",
+                    cursor: "pointer",
                     whiteSpace: "nowrap",
                   }}
                 >
-                  {aiStatus === "loading"
-                    ? "分析中..."
-                    : aiStatus === "done"
-                    ? "再分析する"
-                    : "AIで総合分析する"}
+                  {generatedPrompt ? "プロンプトを再生成" : "分析用プロンプトを生成"}
                 </button>
               </div>
 
-              {aiStatus === "error" && (
-                <div style={{ marginTop: 12, fontSize: 12.5, color: "#FCA5A5" }}>{aiErrorMsg}</div>
-              )}
-
-              {aiStatus === "done" && aiResult && (
-                <div
-                  style={{
-                    marginTop: 16,
-                    display: "grid",
-                    gridTemplateColumns: "repeat(auto-fit,minmax(240px,1fr))",
-                    gap: 14,
-                  }}
-                >
-                  <div
+              {generatedPrompt && (
+                <div style={{ marginTop: 16 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                    <div style={{ fontSize: 11.5, color: "#8B9CB3" }}>
+                      このプロンプトをコピーして、ChatGPTやClaudeなどのAIチャットに貼り付けるだけで専門的な詳細分析が得られます
+                    </div>
+                    <button
+                      onClick={copyPrompt}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 6,
+                        background: copyStatus === "copied" ? "#0F766E" : "#1B2536",
+                        color: "#E7ECF3",
+                        border: "1px solid #2A3548",
+                        borderRadius: 8,
+                        padding: "6px 12px",
+                        fontSize: 12,
+                        fontWeight: 500,
+                        cursor: "pointer",
+                        whiteSpace: "nowrap",
+                        flexShrink: 0,
+                      }}
+                    >
+                      {copyStatus === "copied" ? <Check size={13} /> : <Copy size={13} />}
+                      {copyStatus === "copied" ? "コピーしました" : "コピーする"}
+                    </button>
+                  </div>
+                  <textarea
+                    readOnly
+                    value={generatedPrompt}
+                    onFocus={(e) => e.target.select()}
                     style={{
+                      width: "100%",
+                      height: 260,
+                      resize: "vertical",
                       background: "#0F1826",
                       border: "1px solid #202B3D",
                       borderRadius: 10,
                       padding: "12px 14px",
+                      fontSize: 12,
+                      lineHeight: 1.6,
+                      color: "#E7ECF3",
+                      fontFamily: "'IBM Plex Mono',monospace",
+                      boxSizing: "border-box",
                     }}
-                  >
-                    <div style={{ fontSize: 11, color: "#5EEAD4", fontWeight: 600, marginBottom: 6 }}>現在の状態</div>
-                    <div style={{ fontSize: 12.5, color: "#E7ECF3", lineHeight: 1.7 }}>{aiResult.status}</div>
-                  </div>
-                  <div
-                    style={{
-                      background: "#0F1826",
-                      border: "1px solid #202B3D",
-                      borderRadius: 10,
-                      padding: "12px 14px",
-                    }}
-                  >
-                    <div style={{ fontSize: 11, color: "#F59E0B", fontWeight: 600, marginBottom: 6 }}>課題</div>
-                    <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12.5, color: "#E7ECF3", lineHeight: 1.7 }}>
-                      {(aiResult.issues || []).map((item, i) => (
-                        <li key={i}>{item}</li>
-                      ))}
-                    </ul>
-                  </div>
-                  <div
-                    style={{
-                      background: "#0F1826",
-                      border: "1px solid #202B3D",
-                      borderRadius: 10,
-                      padding: "12px 14px",
-                    }}
-                  >
-                    <div style={{ fontSize: 11, color: "#818CF8", fontWeight: 600, marginBottom: 6 }}>改善策</div>
-                    <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12.5, color: "#E7ECF3", lineHeight: 1.7 }}>
-                      {(aiResult.improvements || []).map((item, i) => (
-                        <li key={i}>{item}</li>
-                      ))}
-                    </ul>
-                  </div>
+                  />
                 </div>
               )}
 
               <div style={{ marginTop: 12, fontSize: 10, color: "#4A5670", lineHeight: 1.6 }}>
-                ※ AIによる傾向の要約であり、医学的診断や治療方針の決定ではありません。実際の対応は必ず医療スタッフの判断で行ってください。
+                ※ 生成されるのはAIへの分析依頼文であり、医学的診断や治療方針の決定ではありません。実際の対応は必ず医療スタッフの判断で行ってください。
               </div>
             </div>
 

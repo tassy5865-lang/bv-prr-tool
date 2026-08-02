@@ -34,6 +34,6 @@ Key state/UI concepts in `BVPRRAnalyzerApp`:
 - Chart order within the single view is user-draggable and tracked in `chartOrder` state (chart panels render with a CSS `order` from `chartOrder.indexOf(id)`).
 - Missing columns (e.g. no BP data in a given CSV) don't error — `hasDbv`/`hasUf`/`hasBp` flags gate each chart/stat independently so partial data still renders what it can.
 
-### AI analysis feature (`runAiAnalysis`)
+### AI analysis prompt generator (`generateAnalysisPrompt`)
 
-The "overall" view has a button that calls `https://api.anthropic.com/v1/messages` directly from the browser with no API key attached. This only works when the built app is running as a Claude.ai artifact, which proxies the request — it does **not** work when deployed to GitHub Pages or any other host. See README.md for the tradeoffs if this needs to become a real backend-backed feature or needs removal for a non-Claude.ai deployment target.
+The "overall" view has a button that builds a detailed Japanese analysis-request prompt from the session summary data entirely client-side (no API calls, no key) and displays it in a read-only textarea with a clipboard-copy button (`copyPrompt`). The user pastes the generated prompt into any AI chat (ChatGPT, Claude, etc.) themselves to get the analysis. This works identically on GitHub Pages and any other host, unlike the earlier direct-API-call version.
