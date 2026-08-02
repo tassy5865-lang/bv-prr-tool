@@ -283,6 +283,21 @@ function computeDerived(base) {
     }
   }
 
+  // ΔBV低下速度（移動平均を15サンプル≈5分前と比較した傾き, %/時間）。マイナスが大きいほど急激な血液濃縮＝脱水進行を示す
+  // ウィンドウが揃うまで(直近5分に満たない先頭区間)はdtが極端に小さく計算が不安定になるため算出しない
+  const RATE_WINDOW = 15;
+  if (hasDbv) {
+    for (let i = 0; i < rows.length; i++) {
+      if (i < RATE_WINDOW) {
+        rows[i].dbvRatePerHour = null;
+        continue;
+      }
+      const j = i - RATE_WINDOW;
+      const dt = rows[i].elapsedMin - rows[j].elapsedMin;
+      rows[i].dbvRatePerHour = dt > 0 ? ((rows[i].dbvMA50 - rows[j].dbvMA50) / dt) * 60 : null;
+    }
+  }
+
   const first = rows[0];
   const last = rows[rows.length - 1];
   const totalPrrVolumeL = rows.reduce((sum, r) => sum + r.prrIntervalVolumeL, 0);
@@ -424,7 +439,7 @@ export default function BVPRRAnalyzerApp() {
   const [isDragging, setIsDragging] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [viewMode, setViewMode] = useState("single"); // "single" | "compare"
-  const [chartOrder, setChartOrder] = useState(["triLine", "uf", "bp", "triple"]);
+  const [chartOrder, setChartOrder] = useState(["triLine", "dbvRate", "dbvBp", "uf", "bp", "triple"]);
   const dragIdRef = useRef(null);
 
   const handleChartDragStart = (id) => (e) => {
@@ -1164,6 +1179,204 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
                     </ResponsiveContainer>
                     <div style={{ fontSize: 10, color: "#4A5670", marginTop: 4, paddingLeft: 6 }}>
                       ※ ΔBVは50区間移動平均、除水速度は左右軸とは別スケール(非表示軸)で重ねて表示しています。形状の連動をご覧ください
+                    </div>
+                  </div>
+                )}
+
+                {/* ΔBV低下速度（脱水評価：血液濃縮の進行スピード） */}
+                {active.hasDbv && (
+                  <div
+                    {...dragTargetProps("dbvRate")}
+                    style={{
+                      order: chartOrder.indexOf("dbvRate"),
+                      background: "#050B14",
+                      border: "1px solid #1B2536",
+                      borderRadius: 12,
+                      padding: "18px 14px 6px",
+                      boxShadow: "inset 0 0 40px rgba(15,118,110,0.08)",
+                      marginBottom: 18,
+                    }}
+                  >
+                    <div
+                      {...dragSourceProps("dbvRate")}
+                      style={{ display: "flex", alignItems: "center", gap: 6, cursor: "grab", marginBottom: 6 }}
+                    >
+                      <GripVertical size={13} color="#4A5670" />
+                      <span style={{ fontSize: 10, color: "#4A5670" }}>ドラッグで並び替え</span>
+                    </div>
+                    <div
+                      style={{
+                        display: "flex",
+                        justifyContent: "space-between",
+                        alignItems: "center",
+                        marginBottom: 4,
+                        paddingLeft: 6,
+                      }}
+                    >
+                      <div
+                        style={{
+                          fontSize: 11.5,
+                          color: "#F87171",
+                          fontFamily: "'IBM Plex Mono',monospace",
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 4,
+                        }}
+                      >
+                        <TrendingDown size={11} /> ΔBV低下速度（脱水評価, %/時間）
+                      </div>
+                      <div style={{ fontSize: 11, color: "#3F4C63" }}>治療経過時間 (分)</div>
+                    </div>
+                    <ResponsiveContainer width="100%" height={220}>
+                      <LineChart data={active.rows} margin={{ top: 4, right: 14, left: -8, bottom: 4 }}>
+                        <CartesianGrid stroke="#152036" strokeDasharray="2 4" vertical={false} />
+                        <XAxis
+                          dataKey="treatTimeMin"
+                          tick={{ fill: "#8B9CB3", fontSize: 10.5 }}
+                          tickFormatter={monitorTick}
+                          stroke="#1B2536"
+                          minTickGap={40}
+                        />
+                        <YAxis tick={{ fill: "#8B9CB3", fontSize: 10.5 }} stroke="#1B2536" width={44} />
+                        <ReferenceLine y={0} stroke="#2A3548" />
+                        <Tooltip
+                          contentStyle={{
+                            background: "#0F1826",
+                            border: "1px solid #2A3548",
+                            borderRadius: 8,
+                            fontSize: 12,
+                          }}
+                          labelFormatter={(v) => `${v} 分`}
+                          formatter={(v) => [`${v.toFixed(2)} %/h`, "ΔBV低下速度"]}
+                        />
+                        <Line
+                          type="monotone"
+                          dataKey="dbvRatePerHour"
+                          stroke="#F87171"
+                          strokeWidth={1.8}
+                          dot={false}
+                          isAnimationActive={false}
+                        />
+                      </LineChart>
+                    </ResponsiveContainer>
+                    <div style={{ fontSize: 10, color: "#4A5670", marginTop: 4, paddingLeft: 6 }}>
+                      ※ ΔBV移動平均の直近15サンプル(約5分)あたりの傾きです。マイナス方向に大きいほど血液濃縮＝脱水が急速に進行していることを示します
+                    </div>
+                  </div>
+                )}
+
+                {/* ΔBV × 収縮期血圧 重ね表示（脱水評価：血液濃縮と血圧低下の連動確認） */}
+                {active.hasDbv && active.hasBp && (
+                  <div
+                    {...dragTargetProps("dbvBp")}
+                    style={{
+                      order: chartOrder.indexOf("dbvBp"),
+                      background: "#050B14",
+                      border: "1px solid #1B2536",
+                      borderRadius: 12,
+                      padding: "18px 14px 6px",
+                      boxShadow: "inset 0 0 40px rgba(15,118,110,0.08)",
+                      marginBottom: 18,
+                    }}
+                  >
+                    <div
+                      {...dragSourceProps("dbvBp")}
+                      style={{ display: "flex", alignItems: "center", gap: 6, cursor: "grab", marginBottom: 6 }}
+                    >
+                      <GripVertical size={13} color="#4A5670" />
+                      <span style={{ fontSize: 10, color: "#4A5670" }}>ドラッグで並び替え</span>
+                    </div>
+                    <div
+                      style={{
+                        display: "flex",
+                        justifyContent: "space-between",
+                        alignItems: "center",
+                        marginBottom: 4,
+                        paddingLeft: 6,
+                        flexWrap: "wrap",
+                        rowGap: 4,
+                      }}
+                    >
+                      <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
+                        <div
+                          style={{
+                            fontSize: 11.5,
+                            color: "#F59E0B",
+                            fontFamily: "'IBM Plex Mono',monospace",
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 4,
+                          }}
+                        >
+                          <Droplet size={11} /> ΔBV 移動平均(50区間, %)
+                        </div>
+                        <div style={{ fontSize: 11.5, color: "#FB923C", fontFamily: "'IBM Plex Mono',monospace" }}>
+                          収縮期血圧 (mmHg)
+                        </div>
+                      </div>
+                      <div style={{ fontSize: 11, color: "#3F4C63" }}>治療経過時間 (分) ・点＝血圧実測タイミング</div>
+                    </div>
+                    <ResponsiveContainer width="100%" height={260}>
+                      <LineChart data={active.rows} margin={{ top: 4, right: 14, left: -8, bottom: 4 }}>
+                        <CartesianGrid stroke="#152036" strokeDasharray="2 4" vertical={false} />
+                        <XAxis
+                          dataKey="treatTimeMin"
+                          tick={{ fill: "#8B9CB3", fontSize: 10.5 }}
+                          tickFormatter={monitorTick}
+                          stroke="#1B2536"
+                          minTickGap={40}
+                        />
+                        <YAxis
+                          yAxisId="dbv"
+                          tick={{ fill: "#F59E0B", fontSize: 10.5 }}
+                          stroke="#1B2536"
+                          width={44}
+                        />
+                        <YAxis
+                          yAxisId="sys"
+                          orientation="right"
+                          tick={{ fill: "#FB923C", fontSize: 10.5 }}
+                          stroke="#1B2536"
+                          width={44}
+                        />
+                        <ReferenceLine y={0} yAxisId="dbv" stroke="#2A3548" />
+                        <Tooltip
+                          contentStyle={{
+                            background: "#0F1826",
+                            border: "1px solid #2A3548",
+                            borderRadius: 8,
+                            fontSize: 12,
+                          }}
+                          labelFormatter={(v) => `${v} 分`}
+                          formatter={(value, name) => {
+                            if (name === "ΔBV移動平均(50区間,%)") return [`${value.toFixed(2)}%`, "ΔBV移動平均"];
+                            return [`${value} mmHg`, "収縮期血圧"];
+                          }}
+                        />
+                        <Line
+                          yAxisId="dbv"
+                          type="monotone"
+                          dataKey="dbvMA50"
+                          name="ΔBV移動平均(50区間,%)"
+                          stroke="#F59E0B"
+                          strokeWidth={1.8}
+                          dot={false}
+                          isAnimationActive={false}
+                        />
+                        <Line
+                          yAxisId="sys"
+                          type="stepAfter"
+                          dataKey="sysBp"
+                          name="収縮期血圧"
+                          stroke="#FB923C"
+                          strokeWidth={1.6}
+                          dot={bpDot("#FB923C", "sysBpChanged")}
+                          isAnimationActive={false}
+                        />
+                      </LineChart>
+                    </ResponsiveContainer>
+                    <div style={{ fontSize: 10, color: "#4A5670", marginTop: 4, paddingLeft: 6 }}>
+                      ※ ΔBVの低下(血液濃縮)と収縮期血圧の低下が同時に進んでいる場合、脱水による循環動態への影響が疑われます
                     </div>
                   </div>
                 )}
