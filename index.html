@@ -4,6 +4,41 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>BV / PRR 分析ツール</title>
+    <style>
+      .print-only {
+        display: none;
+      }
+      @media print {
+        body * {
+          visibility: hidden;
+        }
+        .report-print-area,
+        .report-print-area * {
+          visibility: visible;
+        }
+        .report-print-area {
+          position: absolute;
+          left: 0;
+          top: 0;
+          width: 100%;
+        }
+        .report-print-area .no-print {
+          display: none !important;
+        }
+        .report-print-area .print-only {
+          display: block;
+        }
+        .report-print-area,
+        .report-print-area * {
+          background: #ffffff !important;
+          background-color: #ffffff !important;
+          background-image: none !important;
+          box-shadow: none !important;
+          color: #111827 !important;
+          border-color: #cbd5e1 !important;
+        }
+      }
+    </style>
   </head>
   <body>
     <div id="root"></div>

@@ -28,6 +28,7 @@ import {
   GripVertical,
   Copy,
   Check,
+  Printer,
 } from "lucide-react";
 
 // ---------- CSV / エンコーディング処理 ----------
@@ -893,9 +894,17 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
 
             {/* 詳細パネル */}
             {active && activeBase && (
-              <div style={{ flex: 1, minWidth: 380, display: "flex", flexDirection: "column" }}>
+              <div className="report-print-area" style={{ flex: 1, minWidth: 380, display: "flex", flexDirection: "column" }}>
+                <div className="print-only" style={{ order: -30, marginBottom: 14 }}>
+                  <div style={{ fontSize: 18, fontWeight: 700, color: "#111827" }}>透析 BV / PRR 分析レポート</div>
+                  <div style={{ fontSize: 12, color: "#374151", marginTop: 4 }}>
+                    ファイル: {active.filename} ／ 抽出範囲: {active.startLabel} 〜 {active.endLabel} ／ 作成日時:{" "}
+                    {new Date().toLocaleString("ja-JP")}
+                  </div>
+                </div>
                 {/* 抽出範囲の手動調整 */}
                 <div
+                  className="no-print"
                   style={{
                     order: -20,
                     background: "#0F1826",
@@ -1036,6 +1045,7 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
                   >
                     <div
                       {...dragSourceProps("triLine")}
+                      className="no-print"
                       style={{ display: "flex", alignItems: "center", gap: 6, cursor: "grab", marginBottom: 6 }}
                     >
                       <GripVertical size={13} color="#4A5670" />
@@ -1184,6 +1194,7 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
                   >
                     <div
                       {...dragSourceProps("dbvRate")}
+                      className="no-print"
                       style={{ display: "flex", alignItems: "center", gap: 6, cursor: "grab", marginBottom: 6 }}
                     >
                       <GripVertical size={13} color="#4A5670" />
@@ -1266,6 +1277,7 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
                   >
                     <div
                       {...dragSourceProps("dbvBp")}
+                      className="no-print"
                       style={{ display: "flex", alignItems: "center", gap: 6, cursor: "grab", marginBottom: 6 }}
                     >
                       <GripVertical size={13} color="#4A5670" />
@@ -1382,6 +1394,7 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
                   >
                     <div
                       {...dragSourceProps("uf")}
+                      className="no-print"
                       style={{ display: "flex", alignItems: "center", gap: 6, cursor: "grab", marginBottom: 6 }}
                     >
                       <GripVertical size={13} color="#4A5670" />
@@ -1475,6 +1488,7 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
                   >
                     <div
                       {...dragSourceProps("bp")}
+                      className="no-print"
                       style={{ display: "flex", alignItems: "center", gap: 6, cursor: "grab", marginBottom: 6 }}
                     >
                       <GripVertical size={13} color="#4A5670" />
@@ -1556,6 +1570,7 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
                   >
                     <div
                       {...dragSourceProps("triple")}
+                      className="no-print"
                       style={{ display: "flex", alignItems: "center", gap: 6, cursor: "grab", marginBottom: 6 }}
                     >
                       <GripVertical size={13} color="#4A5670" />
@@ -1613,36 +1628,86 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
                 )}
 
                 {/* ダウンロード */}
-                <button
-                  onClick={() => downloadExcel(active.filename, active)}
-                  style={{
-                    order: 100,
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 8,
-                    background: "#0F766E",
-                    color: "#E7ECF3",
-                    border: "none",
-                    borderRadius: 9,
-                    padding: "10px 16px",
-                    fontSize: 13.5,
-                    fontWeight: 500,
-                    cursor: "pointer",
-                  }}
-                >
-                  <Download size={15} />
-                  抽出済みデータ(BV+PRR)をExcelでダウンロード
-                </button>
+                <div className="no-print" style={{ order: 100, display: "flex", gap: 10, flexWrap: "wrap" }}>
+                  <button
+                    onClick={() => downloadExcel(active.filename, active)}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 8,
+                      background: "#0F766E",
+                      color: "#E7ECF3",
+                      border: "none",
+                      borderRadius: 9,
+                      padding: "10px 16px",
+                      fontSize: 13.5,
+                      fontWeight: 500,
+                      cursor: "pointer",
+                    }}
+                  >
+                    <Download size={15} />
+                    抽出済みデータ(BV+PRR)をExcelでダウンロード
+                  </button>
+                  <button
+                    onClick={() => window.print()}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 8,
+                      background: "#1B2536",
+                      color: "#E7ECF3",
+                      border: "1px solid #2A3548",
+                      borderRadius: 9,
+                      padding: "10px 16px",
+                      fontSize: 13.5,
+                      fontWeight: 500,
+                      cursor: "pointer",
+                    }}
+                  >
+                    <Printer size={15} />
+                    PDFレポート出力（印刷）
+                  </button>
+                </div>
               </div>
             )}
           </div>
         )}
 
         {results.length > 1 && viewMode === "compare" && (
-          <div style={{ marginTop: 20 }}>
+          <div className="report-print-area" style={{ marginTop: 20 }}>
+            <div className="print-only" style={{ marginBottom: 14 }}>
+              <div style={{ fontSize: 18, fontWeight: 700, color: "#111827" }}>透析 BV / PRR 分析レポート（比較ビュー）</div>
+              <div style={{ fontSize: 12, color: "#374151", marginTop: 4 }}>
+                {overallSheet === "all" ? "全曜日" : `${overallSheet}曜日`} ／ 対象 {sheetResults.length} 件 ／ 作成日時:{" "}
+                {new Date().toLocaleString("ja-JP")}
+              </div>
+            </div>
+
+            <div className="no-print" style={{ marginBottom: 16 }}>
+              <button
+                onClick={() => window.print()}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  background: "#1B2536",
+                  color: "#E7ECF3",
+                  border: "1px solid #2A3548",
+                  borderRadius: 9,
+                  padding: "9px 16px",
+                  fontSize: 13,
+                  fontWeight: 500,
+                  cursor: "pointer",
+                }}
+              >
+                <Printer size={15} />
+                PDFレポート出力（印刷）
+              </button>
+            </div>
+
             {/* 曜日別シート切り替え */}
             {presentWeekdays.length > 1 && (
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 16 }}>
+              <div className="no-print" style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 16 }}>
                 {[["all", "全体"], ...presentWeekdays.map((w) => [w, `${w}曜日`])].map(([key, label]) => (
                   <button
                     key={key}
@@ -1895,10 +1960,40 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
         )}
 
         {results.length > 1 && viewMode === "overall" && (
-          <div style={{ marginTop: 20 }}>
+          <div className="report-print-area" style={{ marginTop: 20 }}>
+            <div className="print-only" style={{ marginBottom: 14 }}>
+              <div style={{ fontSize: 18, fontWeight: 700, color: "#111827" }}>透析 BV / PRR 分析レポート（総合分析）</div>
+              <div style={{ fontSize: 12, color: "#374151", marginTop: 4 }}>
+                {overallSheet === "all" ? "全曜日" : `${overallSheet}曜日`} ／ 対象 {sheetResults.length} 件 ／ 作成日時:{" "}
+                {new Date().toLocaleString("ja-JP")}
+              </div>
+            </div>
+
+            <div className="no-print" style={{ marginBottom: 16 }}>
+              <button
+                onClick={() => window.print()}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  background: "#1B2536",
+                  color: "#E7ECF3",
+                  border: "1px solid #2A3548",
+                  borderRadius: 9,
+                  padding: "9px 16px",
+                  fontSize: 13,
+                  fontWeight: 500,
+                  cursor: "pointer",
+                }}
+              >
+                <Printer size={15} />
+                PDFレポート出力（印刷）
+              </button>
+            </div>
+
             {/* 曜日別シート切り替え（週3回透析など、曜日ごとに傾向を見たい場合用） */}
             {presentWeekdays.length > 1 && (
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 16 }}>
+              <div className="no-print" style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 16 }}>
                 {[["all", "全体"], ...presentWeekdays.map((w) => [w, `${w}曜日`])].map(([key, label]) => (
                   <button
                     key={key}
@@ -1926,6 +2021,7 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
 
             {/* AI総合分析用プロンプト生成 */}
             <div
+              className="no-print"
               style={{
                 background: "linear-gradient(135deg, rgba(45,212,191,0.06), rgba(15,118,110,0.03))",
                 border: "1px solid rgba(45,212,191,0.3)",
