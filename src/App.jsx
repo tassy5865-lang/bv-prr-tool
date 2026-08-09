@@ -133,6 +133,15 @@ function weekdayLabelFromTimestamp(ts) {
   return WEEKDAY_LABELS[d.getDay()];
 }
 
+// ファイル名の日時パターンより前の部分を患者(装置)IDとして抽出。取得できない場合はnull
+// 例: M1709234_20260701_085737.csv -> "M1709234"
+function patientIdFromFilename(filename) {
+  const m = filename.match(/\d{4}\d{2}\d{2}_\d{2}\d{2}\d{2}/);
+  if (!m) return null;
+  const prefix = filename.slice(0, m.index).replace(/[_\-\s]+$/, "");
+  return prefix || null;
+}
+
 // ---------- CSVパース（列検出＋PRRによる自動区間のみ。行の絞り込みはderiveで行う） ----------
 
 function parseCsvBase(text, filename) {
@@ -181,6 +190,8 @@ function parseCsvBase(text, filename) {
     shortLabel: shortLabelFromFilename(filename),
     sessionTimestamp: sessionTimestampFromFilename(filename),
     weekdayLabel: weekdayLabelFromTimestamp(sessionTimestampFromFilename(filename)),
+    patientId: patientIdFromFilename(filename),
+    patientLabel: patientIdFromFilename(filename) || "患者ID不明",
     header,
     filteredRows,
     excludedCount,
@@ -603,25 +614,60 @@ export default function BVPRRAnalyzerApp() {
     [results]
   );
 
+  const [overallPatient, setOverallPatient] = useState("all"); // "all" | patientLabel
   const [overallSheet, setOverallSheet] = useState("all"); // "all" | "月" | "火" | ...
 
-  // データに実際に登場する曜日を、月→日の順で並べる
-  const presentWeekdays = useMemo(() => {
-    const order = ["月", "火", "水", "木", "金", "土", "日"];
-    const present = new Set(chronoResults.map((r) => r.weekdayLabel).filter(Boolean));
-    return order.filter((w) => present.has(w));
+  const selectPatient = (key) => {
+    setOverallPatient(key);
+    setOverallSheet("all");
+    setGeneratedPrompt(null);
+    setCopyStatus("idle");
+  };
+  const selectSheet = (key) => {
+    setOverallSheet(key);
+    setGeneratedPrompt(null);
+    setCopyStatus("idle");
+  };
+
+  // データに実際に登場する患者を、初出順に並べる
+  const presentPatients = useMemo(() => {
+    const seen = [];
+    for (const r of chronoResults) {
+      if (!seen.includes(r.patientLabel)) seen.push(r.patientLabel);
+    }
+    return seen;
   }, [chronoResults]);
 
+  // 選択中の患者でまず絞り込み（"all"なら全患者）
+  const patientResults = useMemo(() => {
+    if (overallPatient === "all") return chronoResults;
+    return chronoResults.filter((r) => r.patientLabel === overallPatient);
+  }, [chronoResults, overallPatient]);
+
+  // データに実際に登場する曜日を、月→日の順で並べる（選択中の患者の範囲内で）
+  const presentWeekdays = useMemo(() => {
+    const order = ["月", "火", "水", "木", "金", "土", "日"];
+    const present = new Set(patientResults.map((r) => r.weekdayLabel).filter(Boolean));
+    return order.filter((w) => present.has(w));
+  }, [patientResults]);
+
   const sheetResults = useMemo(() => {
-    if (overallSheet === "all") return chronoResults;
-    return chronoResults.filter((r) => r.weekdayLabel === overallSheet);
-  }, [chronoResults, overallSheet]);
+    if (overallSheet === "all") return patientResults;
+    return patientResults.filter((r) => r.weekdayLabel === overallSheet);
+  }, [patientResults, overallSheet]);
+
+  const scopeLabel = `${overallPatient === "all" ? "全患者" : overallPatient} ／ ${
+    overallSheet === "all" ? "全曜日" : `${overallSheet}曜日`
+  }`;
 
   const [generatedPrompt, setGeneratedPrompt] = useState(null);
   const [copyStatus, setCopyStatus] = useState("idle"); // "idle" | "copied"
 
   const generateAnalysisPrompt = useCallback(() => {
+    const patientPhrase =
+      overallPatient === "all" && presentPatients.length > 1 ? "複数患者の" : "同一患者の";
     const sessionsForPrompt = sheetResults.map((r) => ({
+      患者ID: r.patientLabel,
       セッション: r.shortLabel,
       PRR積算量合計_L: Number(r.totalPrrVolumeL.toFixed(4)),
       最大ΔBV低下率: r.hasDbv ? Number(r.minDbv.toFixed(1)) : null,
@@ -632,8 +678,8 @@ export default function BVPRRAnalyzerApp() {
     }));
 
     const prompt = `あなたは血液透析（除水・血漿再充填ダイナミクス）データを専門的にレビューする臨床工学技士です。
-以下は同一患者の複数回の透析セッションから抽出した数値データです（実施日時の昇順）。
-このデータのみをもとに、下記の観点から詳細かつ専門的に分析してください。
+以下は${patientPhrase}複数回の透析セッションから抽出した数値データです（実施日時の昇順）。
+${patientPhrase === "複数患者の" ? "各セッションの「患者ID」で患者ごとの傾向の違いにも注意してください。\n" : ""}このデータのみをもとに、下記の観点から詳細かつ専門的に分析してください。
 
 【分析してほしい観点】
 1. PRR（血漿再充填）・ΔBV（血液濃縮）の全体的な傾向と、セッションを追うごとの経時的な変化
@@ -659,7 +705,7 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
 
     setGeneratedPrompt(prompt);
     setCopyStatus("idle");
-  }, [sheetResults]);
+  }, [sheetResults, overallPatient, presentPatients]);
 
   const copyPrompt = useCallback(async () => {
     if (!generatedPrompt) return;
@@ -856,6 +902,7 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
                         }}
                         title={r.filename}
                       >
+                        {presentPatients.length > 1 ? `[${r.patientLabel}] ` : ""}
                         {r.filename}
                       </span>
                     </div>
@@ -1678,8 +1725,7 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
             <div className="print-only" style={{ marginBottom: 14 }}>
               <div style={{ fontSize: 18, fontWeight: 700, color: "#111827" }}>透析 BV / PRR 分析レポート（比較ビュー）</div>
               <div style={{ fontSize: 12, color: "#374151", marginTop: 4 }}>
-                {overallSheet === "all" ? "全曜日" : `${overallSheet}曜日`} ／ 対象 {sheetResults.length} 件 ／ 作成日時:{" "}
-                {new Date().toLocaleString("ja-JP")}
+                {scopeLabel} ／ 対象 {sheetResults.length} 件 ／ 作成日時: {new Date().toLocaleString("ja-JP")}
               </div>
             </div>
 
@@ -1705,17 +1751,37 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
               </button>
             </div>
 
+            {/* 患者別シート切り替え */}
+            {presentPatients.length > 1 && (
+              <div className="no-print" style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 8 }}>
+                {[["all", "全患者"], ...presentPatients.map((p) => [p, p])].map(([key, label]) => (
+                  <button
+                    key={key}
+                    onClick={() => selectPatient(key)}
+                    style={{
+                      padding: "6px 12px",
+                      borderRadius: 7,
+                      fontSize: 12,
+                      fontWeight: 500,
+                      cursor: "pointer",
+                      border: overallPatient === key ? "1px solid rgba(244,114,182,0.5)" : "1px solid #202B3D",
+                      background: overallPatient === key ? "rgba(244,114,182,0.14)" : "#0F1826",
+                      color: overallPatient === key ? "#F9A8D4" : "#8B9CB3",
+                    }}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            )}
+
             {/* 曜日別シート切り替え */}
             {presentWeekdays.length > 1 && (
               <div className="no-print" style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 16 }}>
                 {[["all", "全体"], ...presentWeekdays.map((w) => [w, `${w}曜日`])].map(([key, label]) => (
                   <button
                     key={key}
-                    onClick={() => {
-                      setOverallSheet(key);
-                      setGeneratedPrompt(null);
-                      setCopyStatus("idle");
-                    }}
+                    onClick={() => selectSheet(key)}
                     style={{
                       padding: "6px 12px",
                       borderRadius: 7,
@@ -1964,8 +2030,7 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
             <div className="print-only" style={{ marginBottom: 14 }}>
               <div style={{ fontSize: 18, fontWeight: 700, color: "#111827" }}>透析 BV / PRR 分析レポート（総合分析）</div>
               <div style={{ fontSize: 12, color: "#374151", marginTop: 4 }}>
-                {overallSheet === "all" ? "全曜日" : `${overallSheet}曜日`} ／ 対象 {sheetResults.length} 件 ／ 作成日時:{" "}
-                {new Date().toLocaleString("ja-JP")}
+                {scopeLabel} ／ 対象 {sheetResults.length} 件 ／ 作成日時: {new Date().toLocaleString("ja-JP")}
               </div>
             </div>
 
@@ -1991,17 +2056,37 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
               </button>
             </div>
 
+            {/* 患者別シート切り替え */}
+            {presentPatients.length > 1 && (
+              <div className="no-print" style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 8 }}>
+                {[["all", "全患者"], ...presentPatients.map((p) => [p, p])].map(([key, label]) => (
+                  <button
+                    key={key}
+                    onClick={() => selectPatient(key)}
+                    style={{
+                      padding: "6px 12px",
+                      borderRadius: 7,
+                      fontSize: 12,
+                      fontWeight: 500,
+                      cursor: "pointer",
+                      border: overallPatient === key ? "1px solid rgba(244,114,182,0.5)" : "1px solid #202B3D",
+                      background: overallPatient === key ? "rgba(244,114,182,0.14)" : "#0F1826",
+                      color: overallPatient === key ? "#F9A8D4" : "#8B9CB3",
+                    }}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            )}
+
             {/* 曜日別シート切り替え（週3回透析など、曜日ごとに傾向を見たい場合用） */}
             {presentWeekdays.length > 1 && (
               <div className="no-print" style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 16 }}>
                 {[["all", "全体"], ...presentWeekdays.map((w) => [w, `${w}曜日`])].map(([key, label]) => (
                   <button
                     key={key}
-                    onClick={() => {
-                      setOverallSheet(key);
-                      setGeneratedPrompt(null);
-                      setCopyStatus("idle");
-                    }}
+                    onClick={() => selectSheet(key)}
                     style={{
                       padding: "6px 12px",
                       borderRadius: 7,
@@ -2037,9 +2122,9 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
                     AI総合分析用プロンプト生成
                   </div>
                   <div style={{ fontSize: 11.5, color: "#8B9CB3", marginTop: 2 }}>
-                    {overallSheet === "all"
+                    {overallPatient === "all" && overallSheet === "all"
                       ? `読み込んだ${sheetResults.length}件のセッションから、専門的な分析を依頼するプロンプトを自動生成します`
-                      : `${overallSheet}曜日の${sheetResults.length}件のセッションから、専門的な分析を依頼するプロンプトを自動生成します`}
+                      : `${scopeLabel}の${sheetResults.length}件のセッションから、専門的な分析を依頼するプロンプトを自動生成します`}
                   </div>
                 </div>
                 <button
@@ -2140,7 +2225,9 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
                   >
                     {[
                       [
-                        overallSheet === "all" ? "読み込みセッション数" : `${overallSheet}曜日のセッション数`,
+                        overallPatient === "all" && overallSheet === "all"
+                          ? "読み込みセッション数"
+                          : `${scopeLabel}のセッション数`,
                         `${sheetResults.length} 件`,
                       ],
                       ...(avgUf !== null ? [["平均総除水量", `${avgUf.toFixed(2)} L`]] : []),
