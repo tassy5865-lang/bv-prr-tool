@@ -463,6 +463,59 @@ ${rowsXml.join("\n")}
   URL.revokeObjectURL(url);
 }
 
+// ---------- デモデータ生成（実データと同じCSV列を持つサンプルをその場で作成し、通常のアップロード処理に流す） ----------
+
+function generateDemoCsvText(seed, dbvSlope, sysBpStart, diaBpStart) {
+  let s = seed;
+  const rand = () => {
+    s = (s * 1103515245 + 12345) & 0x7fffffff;
+    return s / 0x7fffffff;
+  };
+  const lines = [
+    "hour,min,sec,treat-time[sec],PRR[L/h]*100,dBV[%]*10,UFP-speed[L/h]*100,UF-volume[L]*100,sys-BP[mmHg],dia-BP[mmHg]",
+  ];
+  let sysBp = sysBpStart;
+  let diaBp = diaBpStart;
+  let ufVolumeL = 0;
+  const SAMPLES = 720; // 20秒間隔 x 720 = 4時間
+  for (let i = 0; i < SAMPLES; i++) {
+    const t = i * 20;
+    const hour = 9 + Math.floor(t / 3600);
+    const min = Math.floor((t % 3600) / 60);
+    const sec = t % 60;
+    const prrRaw = Math.round(35 + Math.sin(i / 40) * 12 + rand() * 8);
+    const dbvRaw = Math.round((dbvSlope * i + (rand() - 0.5) * 2.5) * 10);
+    const ufSpeedRaw = Math.round(48 + rand() * 10);
+    ufVolumeL += (ufSpeedRaw / 100) * (20 / 3600);
+    if (i % 54 === 0) {
+      sysBp = Math.max(92, sysBp - Math.round(rand() * 2));
+      diaBp = Math.max(52, diaBp - Math.round(rand() * 1.4));
+    }
+    lines.push(
+      `${hour},${min},${sec},${t},${prrRaw},${dbvRaw},${ufSpeedRaw},${Math.round(ufVolumeL * 100)},${sysBp},${diaBp}`
+    );
+  }
+  return lines.join("\n");
+}
+
+// 患者2名×週3回（曜日違い）のサンプルセッション構成
+const DEMO_SESSIONS = [
+  { patient: "デモ患者A", date: "20260727", seed: 11, dbvSlope: -0.018, sysBp: 148, diaBp: 86 }, // 月
+  { patient: "デモ患者A", date: "20260729", seed: 12, dbvSlope: -0.02, sysBp: 144, diaBp: 84 }, // 水
+  { patient: "デモ患者A", date: "20260731", seed: 13, dbvSlope: -0.016, sysBp: 150, diaBp: 88 }, // 金
+  { patient: "デモ患者B", date: "20260728", seed: 21, dbvSlope: -0.028, sysBp: 132, diaBp: 78 }, // 火
+  { patient: "デモ患者B", date: "20260730", seed: 22, dbvSlope: -0.03, sysBp: 128, diaBp: 76 }, // 木
+  { patient: "デモ患者B", date: "20260801", seed: 23, dbvSlope: -0.026, sysBp: 134, diaBp: 80 }, // 土
+];
+
+function buildDemoFiles() {
+  return DEMO_SESSIONS.map((session) => {
+    const filename = `${session.patient}_${session.date}_090000.csv`;
+    const text = generateDemoCsvText(session.seed, session.dbvSlope, session.sysBp, session.diaBp);
+    return new File([text], filename, { type: "text/csv" });
+  });
+}
+
 const PALETTE = ["#2DD4BF", "#F59E0B", "#818CF8", "#F472B6", "#34D399", "#FB923C", "#60A5FA", "#E879F9"];
 const colorFor = (i) => PALETTE[i % PALETTE.length];
 
@@ -549,6 +602,10 @@ export default function BVPRRAnalyzerApp() {
     setErrors(newErrors);
     setIsProcessing(false);
   }, []);
+
+  const loadDemoData = useCallback(() => {
+    handleFiles(buildDemoFiles());
+  }, [handleFiles]);
 
   const onDrop = useCallback(
     (e) => {
@@ -802,6 +859,30 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
             複数ファイルの同時投入に対応
           </div>
         </div>
+
+        {results.length === 0 && !isProcessing && (
+          <div style={{ marginTop: 12, display: "flex", justifyContent: "center" }}>
+            <button
+              onClick={loadDemoData}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 7,
+                background: "transparent",
+                color: "#5EEAD4",
+                border: "1px solid rgba(45,212,191,0.35)",
+                borderRadius: 8,
+                padding: "8px 16px",
+                fontSize: 12.5,
+                fontWeight: 500,
+                cursor: "pointer",
+              }}
+            >
+              <Activity size={13} />
+              デモデータを試す（患者2名×週3回のサンプルを読み込み）
+            </button>
+          </div>
+        )}
 
         {isProcessing && <div style={{ marginTop: 12, fontSize: 13, color: "#5EEAD4" }}>処理中...</div>}
 
