@@ -142,6 +142,15 @@ function patientIdFromFilename(filename) {
   return prefix || null;
 }
 
+// 透析装置(DCS-100NX)のCSVは、スプレッドシート上でAX列(50列目)に患者名が
+// 記録されているため、その列から患者名を抽出する。列が存在しない場合はnull
+const PATIENT_NAME_COLUMN_INDEX = 49; // AX列（0始まりで49）
+function patientNameFromCsvRow(row) {
+  if (!row || row.length <= PATIENT_NAME_COLUMN_INDEX) return null;
+  const name = (row[PATIENT_NAME_COLUMN_INDEX] || "").trim();
+  return name || null;
+}
+
 // ---------- CSVパース（列検出＋PRRによる自動区間のみ。行の絞り込みはderiveで行う） ----------
 
 function parseCsvBase(text, filename) {
@@ -185,13 +194,17 @@ function parseCsvBase(text, filename) {
   if (ufSpeedIdx === -1 || ufVolumeIdx === -1) missingColumns.push("除水速度/除水量");
   if (sysBpIdx === -1 || diaBpIdx === -1) missingColumns.push("血圧");
 
+  // CSVデータ本体(AX列)に患者名があればそれを優先し、なければファイル名から推定したIDにフォールバック
+  const patientName = patientNameFromCsvRow(filteredRows[0] || allRows[0]);
+  const patientIdFallback = patientIdFromFilename(filename);
+
   return {
     filename,
     shortLabel: shortLabelFromFilename(filename),
     sessionTimestamp: sessionTimestampFromFilename(filename),
     weekdayLabel: weekdayLabelFromTimestamp(sessionTimestampFromFilename(filename)),
-    patientId: patientIdFromFilename(filename),
-    patientLabel: patientIdFromFilename(filename) || "患者ID不明",
+    patientId: patientName || patientIdFallback,
+    patientLabel: patientName || patientIdFallback || "患者ID不明",
     header,
     filteredRows,
     excludedCount,
@@ -465,14 +478,18 @@ ${rowsXml.join("\n")}
 
 // ---------- デモデータ生成（実データと同じCSV列を持つサンプルをその場で作成し、通常のアップロード処理に流す） ----------
 
-function generateDemoCsvText(seed, dbvSlope, sysBpStart, diaBpStart) {
+function generateDemoCsvText(seed, dbvSlope, sysBpStart, diaBpStart, patientName) {
   let s = seed;
   const rand = () => {
     s = (s * 1103515245 + 12345) & 0x7fffffff;
     return s / 0x7fffffff;
   };
+  // 実データはAX列(50列目)に患者名が入っているため、デモでも同じ列位置になるよう
+  // 意味のある10列の後にダミー列を挟んでAX列に患者名を配置する
+  const DUMMY_COLUMN_COUNT = PATIENT_NAME_COLUMN_INDEX - 10; // 10列(意味のある列) の後、AX列の手前まで
+  const dummyHeader = Array.from({ length: DUMMY_COLUMN_COUNT }, (_, i) => `col${i + 11}`).join(",");
   const lines = [
-    "hour,min,sec,treat-time[sec],PRR[L/h]*100,dBV[%]*10,UFP-speed[L/h]*100,UF-volume[L]*100,sys-BP[mmHg],dia-BP[mmHg]",
+    `hour,min,sec,treat-time[sec],PRR[L/h]*100,dBV[%]*10,UFP-speed[L/h]*100,UF-volume[L]*100,sys-BP[mmHg],dia-BP[mmHg],${dummyHeader},patient-name`,
   ];
   let sysBp = sysBpStart;
   let diaBp = diaBpStart;
@@ -491,9 +508,21 @@ function generateDemoCsvText(seed, dbvSlope, sysBpStart, diaBpStart) {
       sysBp = Math.max(92, sysBp - Math.round(rand() * 2));
       diaBp = Math.max(52, diaBp - Math.round(rand() * 1.4));
     }
-    lines.push(
-      `${hour},${min},${sec},${t},${prrRaw},${dbvRaw},${ufSpeedRaw},${Math.round(ufVolumeL * 100)},${sysBp},${diaBp}`
-    );
+    const rowValues = [
+      hour,
+      min,
+      sec,
+      t,
+      prrRaw,
+      dbvRaw,
+      ufSpeedRaw,
+      Math.round(ufVolumeL * 100),
+      sysBp,
+      diaBp,
+      ...Array(DUMMY_COLUMN_COUNT).fill(""),
+      patientName,
+    ];
+    lines.push(rowValues.join(","));
   }
   return lines.join("\n");
 }
@@ -511,7 +540,7 @@ const DEMO_SESSIONS = [
 function buildDemoFiles() {
   return DEMO_SESSIONS.map((session) => {
     const filename = `${session.patient}_${session.date}_090000.csv`;
-    const text = generateDemoCsvText(session.seed, session.dbvSlope, session.sysBp, session.diaBp);
+    const text = generateDemoCsvText(session.seed, session.dbvSlope, session.sysBp, session.diaBp, session.patient);
     return new File([text], filename, { type: "text/csv" });
   });
 }
@@ -673,6 +702,7 @@ export default function BVPRRAnalyzerApp() {
 
   const [overallPatient, setOverallPatient] = useState("all"); // "all" | patientLabel
   const [overallSheet, setOverallSheet] = useState("all"); // "all" | "月" | "火" | ...
+  const [singlePatient, setSinglePatient] = useState("all"); // "all" | patientLabel（個別ビューのファイル一覧の絞り込み）
 
   const selectPatient = (key) => {
     setOverallPatient(key);
@@ -694,6 +724,20 @@ export default function BVPRRAnalyzerApp() {
     }
     return seen;
   }, [chronoResults]);
+
+  // 個別ビューのファイル一覧を、選択中の患者タブで絞り込む
+  const singleVisibleResults = useMemo(() => {
+    if (singlePatient === "all") return results;
+    return results.filter((r) => r.patientLabel === singlePatient);
+  }, [results, singlePatient]);
+
+  const selectSinglePatient = (key) => {
+    setSinglePatient(key);
+    const visible = key === "all" ? results : results.filter((r) => r.patientLabel === key);
+    if (visible.length > 0 && !visible.some((r) => r.id === activeId)) {
+      setActiveId(visible[0].id);
+    }
+  };
 
   // 選択中の患者でまず絞り込み（"all"なら全患者）
   const patientResults = useMemo(() => {
@@ -939,6 +983,28 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
           <div style={{ marginTop: 20, display: "flex", gap: 20, alignItems: "flex-start", flexWrap: "wrap" }}>
             {/* ファイル一覧 */}
             <div style={{ width: 240, flexShrink: 0 }}>
+              {presentPatients.length > 1 && (
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
+                  {[["all", "全患者"], ...presentPatients.map((p) => [p, p])].map(([key, label]) => (
+                    <button
+                      key={key}
+                      onClick={() => selectSinglePatient(key)}
+                      style={{
+                        padding: "6px 12px",
+                        borderRadius: 7,
+                        fontSize: 12,
+                        fontWeight: 500,
+                        cursor: "pointer",
+                        border: singlePatient === key ? "1px solid rgba(244,114,182,0.5)" : "1px solid #202B3D",
+                        background: singlePatient === key ? "rgba(244,114,182,0.14)" : "#0F1826",
+                        color: singlePatient === key ? "#F9A8D4" : "#8B9CB3",
+                      }}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              )}
               <div
                 style={{
                   fontSize: 11.5,
@@ -948,10 +1014,10 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
                   textTransform: "uppercase",
                 }}
               >
-                読み込み済み ({results.length})
+                読み込み済み ({singleVisibleResults.length})
               </div>
               <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                {results.map((r) => (
+                {singleVisibleResults.map((r) => (
                   <div
                     key={r.id}
                     onClick={() => setActiveId(r.id)}
@@ -983,7 +1049,7 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
                         }}
                         title={r.filename}
                       >
-                        {presentPatients.length > 1 ? `[${r.patientLabel}] ` : ""}
+                        {presentPatients.length > 1 && singlePatient === "all" ? `[${r.patientLabel}] ` : ""}
                         {r.filename}
                       </span>
                     </div>
