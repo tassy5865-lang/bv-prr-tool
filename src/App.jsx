@@ -145,8 +145,9 @@ function patientIdFromFilename(filename) {
   return prefix || null;
 }
 
-// 透析装置(DCS-100NX)のCSVは、スプレッドシート上でAX列(50列目)に患者名が
-// 記録されているため、その列から患者名を抽出する。列が存在しない場合はnull
+// 透析装置(DCS-100NX)のCSVは、1行目(ヘッダー行)のAX列(50列目)に患者名が
+// 記録されている。データ行(2行目以降)は列数が少なく(実データで41列)AX列まで
+// 届かないため、患者名は必ずヘッダー行から読む。列が存在しない場合はnull
 const PATIENT_NAME_COLUMN_INDEX = 49; // AX列（0始まりで49）
 function patientNameFromCsvRow(row) {
   if (!row || row.length <= PATIENT_NAME_COLUMN_INDEX) return null;
@@ -198,8 +199,8 @@ function parseCsvBase(text, filename) {
   if (ufSpeedIdx === -1 || ufVolumeIdx === -1) missingColumns.push("除水速度/除水量");
   if (sysBpIdx === -1 || diaBpIdx === -1) missingColumns.push("血圧");
 
-  // CSVデータ本体(AX列)に患者名があればそれを優先し、なければファイル名から推定したIDにフォールバック
-  const patientName = patientNameFromCsvRow(filteredRows[0] || allRows[0]);
+  // ヘッダー行のAX列に患者名があればそれを優先し、なければファイル名から推定したIDにフォールバック
+  const patientName = patientNameFromCsvRow(header);
   const patientIdFallback = patientIdFromFilename(filename);
 
   return {
@@ -490,12 +491,13 @@ function generateDemoCsvText(seed, dbvSlope, sysBpStart, diaBpStart, patientName
     s = (s * 1103515245 + 12345) & 0x7fffffff;
     return s / 0x7fffffff;
   };
-  // 実データはAX列(50列目)に患者名が入っているため、デモでも同じ列位置になるよう
-  // 意味のある10列の後にダミー列を挟んでAX列に患者名を配置する
+  // 実データはヘッダー行(1行目)のAX列(50列目)にのみ患者名が入っており、
+  // データ行はAX列まで届かない短い列数のため、デモでも同じ構造(ヘッダー行にだけ
+  // 患者名を配置し、データ行には含めない)を再現する
   const DUMMY_COLUMN_COUNT = PATIENT_NAME_COLUMN_INDEX - 10; // 10列(意味のある列) の後、AX列の手前まで
   const dummyHeader = Array.from({ length: DUMMY_COLUMN_COUNT }, (_, i) => `col${i + 11}`).join(",");
   const lines = [
-    `hour,min,sec,treat-time[sec],PRR[L/h]*100,dBV[%]*10,UFP-speed[L/h]*100,UF-volume[L]*100,sys-BP[mmHg],dia-BP[mmHg],${dummyHeader},patient-name`,
+    `hour,min,sec,treat-time[sec],PRR[L/h]*100,dBV[%]*10,UFP-speed[L/h]*100,UF-volume[L]*100,sys-BP[mmHg],dia-BP[mmHg],${dummyHeader},${patientName}`,
   ];
   let sysBp = sysBpStart;
   let diaBp = diaBpStart;
@@ -514,20 +516,7 @@ function generateDemoCsvText(seed, dbvSlope, sysBpStart, diaBpStart, patientName
       sysBp = Math.max(92, sysBp - Math.round(rand() * 2));
       diaBp = Math.max(52, diaBp - Math.round(rand() * 1.4));
     }
-    const rowValues = [
-      hour,
-      min,
-      sec,
-      t,
-      prrRaw,
-      dbvRaw,
-      ufSpeedRaw,
-      Math.round(ufVolumeL * 100),
-      sysBp,
-      diaBp,
-      ...Array(DUMMY_COLUMN_COUNT).fill(""),
-      patientName,
-    ];
+    const rowValues = [hour, min, sec, t, prrRaw, dbvRaw, ufSpeedRaw, Math.round(ufVolumeL * 100), sysBp, diaBp];
     lines.push(rowValues.join(","));
   }
   return lines.join("\n");
