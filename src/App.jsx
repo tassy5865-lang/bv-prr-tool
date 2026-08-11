@@ -767,8 +767,15 @@ export default function BVPRRAnalyzerApp() {
   const generateAnalysisPrompt = useCallback(() => {
     const patientPhrase =
       overallPatient === "all" && presentPatients.length > 1 ? "複数患者の" : "同一患者の";
+    // 外部AIチャットに貼り付けて使う想定のため、実患者名は送信せず仮名(患者A/患者B...)に置き換える
+    const anonLabels = new Map();
+    sheetResults.forEach((r) => {
+      if (!anonLabels.has(r.patientId)) {
+        anonLabels.set(r.patientId, `患者${String.fromCharCode(65 + anonLabels.size)}`);
+      }
+    });
     const sessionsForPrompt = sheetResults.map((r) => ({
-      患者ID: r.patientLabel,
+      患者ID: anonLabels.get(r.patientId),
       セッション: r.shortLabel,
       PRR積算量合計_L: Number(r.totalPrrVolumeL.toFixed(4)),
       最大ΔBV低下率: r.hasDbv ? Number(r.minDbv.toFixed(1)) : null,
