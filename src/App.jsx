@@ -35,7 +35,9 @@ import {
 
 function decodeBytes(buffer) {
   try {
-    return new TextDecoder("shift_jis").decode(buffer);
+    // fatal: true でないと不正なバイト列でも例外を投げず置換文字で黙って
+    // デコードしてしまい、UTF-8へのフォールバックが機能しなくなる
+    return new TextDecoder("shift_jis", { fatal: true }).decode(buffer);
   } catch (e) {
     return new TextDecoder("utf-8").decode(buffer);
   }
@@ -68,7 +70,8 @@ function autoDetectRange(prrVals) {
     const prev = prrVals[i - 1];
     const cur = prrVals[i];
     if (prev >= 0 && cur < 0 && prev - cur > CLIFF_DROP_THRESHOLD) {
-      cliffIdx = i - 1;
+      cliffIdx = i - 1; // 最初の急落＝治療終了・センサ外れの瞬間を採用する
+      break;
     }
   }
   if (cliffIdx !== null) endIdx = cliffIdx;
@@ -159,6 +162,7 @@ function parseCsvBase(text, filename) {
     throw new Error("データ行が見つかりませんでした");
   }
   const header = splitCsvLine(lines[0]);
+  const sessionTimestamp = sessionTimestampFromFilename(filename);
 
   const prrIdx = findColumnIndex(header, ["PRR[L/h]*100", "PRR"]);
   if (prrIdx === -1) {
@@ -201,8 +205,8 @@ function parseCsvBase(text, filename) {
   return {
     filename,
     shortLabel: shortLabelFromFilename(filename),
-    sessionTimestamp: sessionTimestampFromFilename(filename),
-    weekdayLabel: weekdayLabelFromTimestamp(sessionTimestampFromFilename(filename)),
+    sessionTimestamp,
+    weekdayLabel: weekdayLabelFromTimestamp(sessionTimestamp),
     patientId: patientName || patientIdFallback,
     patientLabel: patientName || patientIdFallback || "患者ID不明",
     header,
@@ -252,7 +256,8 @@ function computeDerived(base) {
   const e = Math.max(s + 1, Math.min(rangeEnd, filteredRows.length - 1));
 
   const extracted = filteredRows.slice(s, e + 1);
-  const firstTreatTimeSec = ttIdx !== -1 ? parseInt(extracted[0][ttIdx], 10) : null;
+  const firstTreatTimeSecRaw = ttIdx !== -1 ? parseInt(extracted[0][ttIdx], 10) : null;
+  const firstTreatTimeSec = Number.isNaN(firstTreatTimeSecRaw) ? null : firstTreatTimeSecRaw;
 
   let prevSysBp = null;
   let prevDiaBp = null;
@@ -266,7 +271,8 @@ function computeDerived(base) {
     const ufVolumeL = hasUf ? parseInt(r[ufVolumeIdx], 10) / 100 : null;
     const sysBp = hasBp ? parseInt(r[sysBpIdx], 10) : null;
     const diaBp = hasBp ? parseInt(r[diaBpIdx], 10) : null;
-    const treatTimeSec = ttIdx !== -1 ? parseInt(r[ttIdx], 10) : null;
+    const treatTimeSecRaw = ttIdx !== -1 ? parseInt(r[ttIdx], 10) : null;
+    const treatTimeSec = Number.isNaN(treatTimeSecRaw) ? null : treatTimeSecRaw;
     const elapsedMin =
       treatTimeSec !== null && firstTreatTimeSec !== null
         ? Math.round(((treatTimeSec - firstTreatTimeSec) / 60) * 100) / 100
@@ -558,6 +564,90 @@ function bpDot(color, changedKey) {
   };
 }
 
+// compare/overall両ビューで共通の「印刷ボタン＋患者タブ＋曜日タブ」ブロック
+function ScopeTabs({
+  presentPatients,
+  overallPatient,
+  selectPatient,
+  presentWeekdays,
+  overallSheet,
+  selectSheet,
+}) {
+  return (
+    <>
+      <div className="no-print" style={{ marginBottom: 16 }}>
+        <button
+          onClick={() => window.print()}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            background: "#1B2536",
+            color: "#E7ECF3",
+            border: "1px solid #2A3548",
+            borderRadius: 9,
+            padding: "9px 16px",
+            fontSize: 13,
+            fontWeight: 500,
+            cursor: "pointer",
+          }}
+        >
+          <Printer size={15} />
+          PDFレポート出力（印刷）
+        </button>
+      </div>
+
+      {/* 患者別シート切り替え */}
+      {presentPatients.length > 1 && (
+        <div className="no-print" style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 8 }}>
+          {[["all", "全患者"], ...presentPatients.map((p) => [p, p])].map(([key, label]) => (
+            <button
+              key={key}
+              onClick={() => selectPatient(key)}
+              style={{
+                padding: "6px 12px",
+                borderRadius: 7,
+                fontSize: 12,
+                fontWeight: 500,
+                cursor: "pointer",
+                border: overallPatient === key ? "1px solid rgba(244,114,182,0.5)" : "1px solid #202B3D",
+                background: overallPatient === key ? "rgba(244,114,182,0.14)" : "#0F1826",
+                color: overallPatient === key ? "#F9A8D4" : "#8B9CB3",
+              }}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* 曜日別シート切り替え */}
+      {presentWeekdays.length > 1 && (
+        <div className="no-print" style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 16 }}>
+          {[["all", "全体"], ...presentWeekdays.map((w) => [w, `${w}曜日`])].map(([key, label]) => (
+            <button
+              key={key}
+              onClick={() => selectSheet(key)}
+              style={{
+                padding: "6px 12px",
+                borderRadius: 7,
+                fontSize: 12,
+                fontWeight: 500,
+                cursor: "pointer",
+                border: overallSheet === key ? "1px solid rgba(129,140,248,0.5)" : "1px solid #202B3D",
+                background: overallSheet === key ? "rgba(129,140,248,0.14)" : "#0F1826",
+                color: overallSheet === key ? "#A5B4FC" : "#8B9CB3",
+              }}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
 // ---------- UI ----------
 
 export default function BVPRRAnalyzerApp() {
@@ -768,14 +858,18 @@ export default function BVPRRAnalyzerApp() {
     const patientPhrase =
       overallPatient === "all" && presentPatients.length > 1 ? "複数患者の" : "同一患者の";
     // 外部AIチャットに貼り付けて使う想定のため、実患者名は送信せず仮名(患者A/患者B...)に置き換える
+    // patientId は AX列の患者名 → ファイル名由来のIDの順で解決するが、どちらも取れない
+    // セッションは patientId が null になるため、そのままキーにすると別患者同士が
+    // 同じ仮名に統合されてしまう。null の場合はセッション固有の id をキーにして分離する。
     const anonLabels = new Map();
     sheetResults.forEach((r) => {
-      if (!anonLabels.has(r.patientId)) {
-        anonLabels.set(r.patientId, `患者${String.fromCharCode(65 + anonLabels.size)}`);
+      const key = r.patientId ?? `__unresolved_${r.id}`;
+      if (!anonLabels.has(key)) {
+        anonLabels.set(key, `患者${String.fromCharCode(65 + anonLabels.size)}`);
       }
     });
     const sessionsForPrompt = sheetResults.map((r) => ({
-      患者ID: anonLabels.get(r.patientId),
+      患者ID: anonLabels.get(r.patientId ?? `__unresolved_${r.id}`),
       セッション: r.shortLabel,
       PRR積算量合計_L: Number(r.totalPrrVolumeL.toFixed(4)),
       最大ΔBV低下率: r.hasDbv ? Number(r.minDbv.toFixed(1)) : null,
@@ -1883,75 +1977,14 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
               </div>
             </div>
 
-            <div className="no-print" style={{ marginBottom: 16 }}>
-              <button
-                onClick={() => window.print()}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 8,
-                  background: "#1B2536",
-                  color: "#E7ECF3",
-                  border: "1px solid #2A3548",
-                  borderRadius: 9,
-                  padding: "9px 16px",
-                  fontSize: 13,
-                  fontWeight: 500,
-                  cursor: "pointer",
-                }}
-              >
-                <Printer size={15} />
-                PDFレポート出力（印刷）
-              </button>
-            </div>
-
-            {/* 患者別シート切り替え */}
-            {presentPatients.length > 1 && (
-              <div className="no-print" style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 8 }}>
-                {[["all", "全患者"], ...presentPatients.map((p) => [p, p])].map(([key, label]) => (
-                  <button
-                    key={key}
-                    onClick={() => selectPatient(key)}
-                    style={{
-                      padding: "6px 12px",
-                      borderRadius: 7,
-                      fontSize: 12,
-                      fontWeight: 500,
-                      cursor: "pointer",
-                      border: overallPatient === key ? "1px solid rgba(244,114,182,0.5)" : "1px solid #202B3D",
-                      background: overallPatient === key ? "rgba(244,114,182,0.14)" : "#0F1826",
-                      color: overallPatient === key ? "#F9A8D4" : "#8B9CB3",
-                    }}
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
-            )}
-
-            {/* 曜日別シート切り替え */}
-            {presentWeekdays.length > 1 && (
-              <div className="no-print" style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 16 }}>
-                {[["all", "全体"], ...presentWeekdays.map((w) => [w, `${w}曜日`])].map(([key, label]) => (
-                  <button
-                    key={key}
-                    onClick={() => selectSheet(key)}
-                    style={{
-                      padding: "6px 12px",
-                      borderRadius: 7,
-                      fontSize: 12,
-                      fontWeight: 500,
-                      cursor: "pointer",
-                      border: overallSheet === key ? "1px solid rgba(129,140,248,0.5)" : "1px solid #202B3D",
-                      background: overallSheet === key ? "rgba(129,140,248,0.14)" : "#0F1826",
-                      color: overallSheet === key ? "#A5B4FC" : "#8B9CB3",
-                    }}
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
-            )}
+            <ScopeTabs
+              presentPatients={presentPatients}
+              overallPatient={overallPatient}
+              selectPatient={selectPatient}
+              presentWeekdays={presentWeekdays}
+              overallSheet={overallSheet}
+              selectSheet={selectSheet}
+            />
 
             {/* 比較サマリー表 */}
             <div
@@ -2188,75 +2221,14 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
               </div>
             </div>
 
-            <div className="no-print" style={{ marginBottom: 16 }}>
-              <button
-                onClick={() => window.print()}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 8,
-                  background: "#1B2536",
-                  color: "#E7ECF3",
-                  border: "1px solid #2A3548",
-                  borderRadius: 9,
-                  padding: "9px 16px",
-                  fontSize: 13,
-                  fontWeight: 500,
-                  cursor: "pointer",
-                }}
-              >
-                <Printer size={15} />
-                PDFレポート出力（印刷）
-              </button>
-            </div>
-
-            {/* 患者別シート切り替え */}
-            {presentPatients.length > 1 && (
-              <div className="no-print" style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 8 }}>
-                {[["all", "全患者"], ...presentPatients.map((p) => [p, p])].map(([key, label]) => (
-                  <button
-                    key={key}
-                    onClick={() => selectPatient(key)}
-                    style={{
-                      padding: "6px 12px",
-                      borderRadius: 7,
-                      fontSize: 12,
-                      fontWeight: 500,
-                      cursor: "pointer",
-                      border: overallPatient === key ? "1px solid rgba(244,114,182,0.5)" : "1px solid #202B3D",
-                      background: overallPatient === key ? "rgba(244,114,182,0.14)" : "#0F1826",
-                      color: overallPatient === key ? "#F9A8D4" : "#8B9CB3",
-                    }}
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
-            )}
-
-            {/* 曜日別シート切り替え（週3回透析など、曜日ごとに傾向を見たい場合用） */}
-            {presentWeekdays.length > 1 && (
-              <div className="no-print" style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 16 }}>
-                {[["all", "全体"], ...presentWeekdays.map((w) => [w, `${w}曜日`])].map(([key, label]) => (
-                  <button
-                    key={key}
-                    onClick={() => selectSheet(key)}
-                    style={{
-                      padding: "6px 12px",
-                      borderRadius: 7,
-                      fontSize: 12,
-                      fontWeight: 500,
-                      cursor: "pointer",
-                      border: overallSheet === key ? "1px solid rgba(129,140,248,0.5)" : "1px solid #202B3D",
-                      background: overallSheet === key ? "rgba(129,140,248,0.14)" : "#0F1826",
-                      color: overallSheet === key ? "#A5B4FC" : "#8B9CB3",
-                    }}
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
-            )}
+            <ScopeTabs
+              presentPatients={presentPatients}
+              overallPatient={overallPatient}
+              selectPatient={selectPatient}
+              presentWeekdays={presentWeekdays}
+              overallSheet={overallSheet}
+              selectSheet={selectSheet}
+            />
 
             {/* AI総合分析用プロンプト生成 */}
             <div
