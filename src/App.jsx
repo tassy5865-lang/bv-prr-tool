@@ -44,7 +44,40 @@ function decodeBytes(buffer) {
 }
 
 function splitCsvLine(line) {
-  return line.split(",");
+  const fields = [];
+  let cur = "";
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (line[i + 1] === '"') {
+          cur += '"';
+          i++;
+        } else {
+          inQuotes = false;
+        }
+      } else {
+        cur += ch;
+      }
+    } else if (ch === '"') {
+      inQuotes = true;
+    } else if (ch === ",") {
+      fields.push(cur);
+      cur = "";
+    } else {
+      cur += ch;
+    }
+  }
+  fields.push(cur);
+  return fields;
+}
+
+// parseInt だと空欄/非数値セルが NaN になり下流の合計・比較を汚染するため、
+// 数値化できないセルは明示的に null として扱う
+function parseIntOrNull(str) {
+  const n = parseInt(str, 10);
+  return Number.isNaN(n) ? null : n;
 }
 
 function findColumnIndex(header, matchers) {
@@ -78,7 +111,16 @@ function autoDetectRange(prrVals) {
   return { startIdx, endIdx };
 }
 
-function pearson(xs, ys) {
+function pearson(xsIn, ysIn) {
+  // 欠損値(null)のペアを0扱いで混入させないよう、両方が数値のペアのみ残す
+  const xs = [];
+  const ys = [];
+  for (let i = 0; i < xsIn.length; i++) {
+    if (typeof xsIn[i] === "number" && typeof ysIn[i] === "number") {
+      xs.push(xsIn[i]);
+      ys.push(ysIn[i]);
+    }
+  }
   const n = xs.length;
   if (n < 2) return null;
   const mx = xs.reduce((a, b) => a + b, 0) / n;
@@ -267,11 +309,14 @@ function computeDerived(base) {
     const raw = parseInt(r[prrIdx], 10);
     const prrInstant = raw / 100; // PRR 瞬時値 [L/h]
     const prrIntervalVolumeL = prrInstant * (20 / 3600); // この20秒間にPRRが示す量 [L]
-    const dbvPercent = hasDbv ? parseInt(r[dbvIdx], 10) / 10 : null;
-    const ufSpeedLh = hasUf ? parseInt(r[ufSpeedIdx], 10) / 100 : null;
-    const ufVolumeL = hasUf ? parseInt(r[ufVolumeIdx], 10) / 100 : null;
-    const sysBp = hasBp ? parseInt(r[sysBpIdx], 10) : null;
-    const diaBp = hasBp ? parseInt(r[diaBpIdx], 10) : null;
+    const dbvRaw = hasDbv ? parseIntOrNull(r[dbvIdx]) : null;
+    const dbvPercent = dbvRaw !== null ? dbvRaw / 10 : null;
+    const ufSpeedRaw = hasUf ? parseIntOrNull(r[ufSpeedIdx]) : null;
+    const ufSpeedLh = ufSpeedRaw !== null ? ufSpeedRaw / 100 : null;
+    const ufVolumeRaw = hasUf ? parseIntOrNull(r[ufVolumeIdx]) : null;
+    const ufVolumeL = ufVolumeRaw !== null ? ufVolumeRaw / 100 : null;
+    const sysBp = hasBp ? parseIntOrNull(r[sysBpIdx]) : null;
+    const diaBp = hasBp ? parseIntOrNull(r[diaBpIdx]) : null;
     const treatTimeSecRaw = ttIdx !== -1 ? parseInt(r[ttIdx], 10) : null;
     const treatTimeSec = Number.isNaN(treatTimeSecRaw) ? null : treatTimeSecRaw;
     const elapsedMin =
@@ -312,8 +357,14 @@ function computeDerived(base) {
     for (let i = 0; i < rows.length; i++) {
       const start = Math.max(0, i - MA_WINDOW + 1);
       let sum = 0;
-      for (let j = start; j <= i; j++) sum += rows[j].dbvPercent;
-      rows[i].dbvMA50 = sum / (i - start + 1);
+      let count = 0;
+      for (let j = start; j <= i; j++) {
+        if (rows[j].dbvPercent !== null) {
+          sum += rows[j].dbvPercent;
+          count++;
+        }
+      }
+      rows[i].dbvMA50 = count > 0 ? sum / count : null;
     }
   }
 
@@ -328,7 +379,10 @@ function computeDerived(base) {
       }
       const j = i - RATE_WINDOW;
       const dt = rows[i].elapsedMin - rows[j].elapsedMin;
-      rows[i].dbvRatePerHour = dt > 0 ? ((rows[i].dbvMA50 - rows[j].dbvMA50) / dt) * 60 : null;
+      rows[i].dbvRatePerHour =
+        dt > 0 && rows[i].dbvMA50 !== null && rows[j].dbvMA50 !== null
+          ? ((rows[i].dbvMA50 - rows[j].dbvMA50) / dt) * 60
+          : null;
     }
   }
 
@@ -336,10 +390,11 @@ function computeDerived(base) {
   const last = rows[rows.length - 1];
   const totalPrrVolumeL = rows.reduce((sum, r) => sum + r.prrIntervalVolumeL, 0);
 
-  let minDbvRow = hasDbv ? rows[0] : null;
+  let minDbvRow = null;
   if (hasDbv) {
     rows.forEach((r) => {
-      if (r.dbvPercent < minDbvRow.dbvPercent) minDbvRow = r;
+      if (r.dbvPercent === null) return;
+      if (minDbvRow === null || r.dbvPercent < minDbvRow.dbvPercent) minDbvRow = r;
     });
   }
 
@@ -352,12 +407,12 @@ function computeDerived(base) {
 
   let minSysRow = null;
   if (hasBp) {
-    minSysRow = rows[0];
     rows.forEach((r) => {
-      if (r.sysBp < minSysRow.sysBp) minSysRow = r;
+      if (r.sysBp === null) return;
+      if (minSysRow === null || r.sysBp < minSysRow.sysBp) minSysRow = r;
     });
   }
-  const sysDrop = hasBp ? first.sysBp - minSysRow.sysBp : null;
+  const sysDrop = hasBp && minSysRow && first.sysBp !== null ? first.sysBp - minSysRow.sysBp : null;
 
   const corrDbvSys = hasBp && hasDbv
     ? pearson(
@@ -382,14 +437,14 @@ function computeDerived(base) {
     hasUf,
     hasBp,
     totalPrrVolumeL,
-    minDbv: hasDbv ? minDbvRow.dbvPercent : null,
-    minDbvTime: hasDbv
+    minDbv: minDbvRow ? minDbvRow.dbvPercent : null,
+    minDbvTime: minDbvRow
       ? `${minDbvRow.hour}:${String(minDbvRow.min).padStart(2, "0")}:${String(minDbvRow.sec).padStart(2, "0")}`
       : "-",
     corrDbvPrr,
     totalUfVolumeL,
-    minSysBp: hasBp ? minSysRow.sysBp : null,
-    minSysBpTime: hasBp
+    minSysBp: minSysRow ? minSysRow.sysBp : null,
+    minSysBpTime: minSysRow
       ? `${minSysRow.hour}:${String(minSysRow.min).padStart(2, "0")}:${String(minSysRow.sec).padStart(2, "0")}`
       : "-",
     sysDrop,
@@ -743,8 +798,21 @@ export default function BVPRRAnalyzerApp() {
     );
   };
 
-  // 全ファイル分をまとめて派生データ化（範囲変更のたびに再計算）
-  const results = useMemo(() => bases.map((b) => ({ ...b, ...computeDerived(b) })), [bases]);
+  // 全ファイル分をまとめて派生データ化。updateRangeは変更対象のbaseだけ新しい
+  // オブジェクト参照を作るので、base参照をキーにcomputeDerivedの結果をキャッシュし、
+  // 範囲スライダー操作のたびに全ファイル分を再計算しないようにする
+  const derivedCacheRef = useRef(new WeakMap());
+  const results = useMemo(() => {
+    const cache = derivedCacheRef.current;
+    return bases.map((b) => {
+      let derived = cache.get(b);
+      if (!derived) {
+        derived = computeDerived(b);
+        cache.set(b, derived);
+      }
+      return { ...b, ...derived };
+    });
+  }, [bases]);
 
   const active = results.find((r) => r.id === activeId);
   const activeBase = bases.find((b) => b.id === activeId);
@@ -773,9 +841,17 @@ export default function BVPRRAnalyzerApp() {
 
   const chronoResults = useMemo(
     () =>
-      [...results].sort(
-        (a, b) => (a.sessionTimestamp ?? Infinity) - (b.sessionTimestamp ?? Infinity)
-      ),
+      // sessionTimestamp が両方 null の場合 (Infinity - Infinity = NaN) は
+      // 比較関数の返り値として不正 (仕様上未定義動作) になるため、null は
+      // 明示的に「後ろ」扱いにして NaN を返さないようにする
+      [...results].sort((a, b) => {
+        const ta = a.sessionTimestamp;
+        const tb = b.sessionTimestamp;
+        if (ta === null && tb === null) return 0;
+        if (ta === null) return 1;
+        if (tb === null) return -1;
+        return ta - tb;
+      }),
     [results]
   );
 
@@ -844,8 +920,6 @@ export default function BVPRRAnalyzerApp() {
   const [copyStatus, setCopyStatus] = useState("idle"); // "idle" | "copied"
 
   const generateAnalysisPrompt = useCallback(() => {
-    const patientPhrase =
-      overallPatient === "all" && presentPatients.length > 1 ? "複数患者の" : "同一患者の";
     // 外部AIチャットに貼り付けて使う想定のため、実患者名は送信せず仮名(患者A/患者B...)に置き換える
     // patientId は AX列の患者名 → ファイル名由来のIDの順で解決するが、どちらも取れない
     // セッションは patientId が null になるため、そのままキーにすると別患者同士が
@@ -857,11 +931,15 @@ export default function BVPRRAnalyzerApp() {
         anonLabels.set(key, `患者${String.fromCharCode(65 + anonLabels.size)}`);
       }
     });
+    // 患者タブ/曜日タブで絞り込んだ結果(sheetResults)に実際に何人分の患者が
+    // 含まれているかで判定する（presentPatients は全体件数なので、絞り込み後も
+    // 「複数患者の」と誤指示してしまうことがあった）
+    const patientPhrase = anonLabels.size > 1 ? "複数患者の" : "同一患者の";
     const sessionsForPrompt = sheetResults.map((r) => ({
       患者ID: anonLabels.get(r.patientId ?? `__unresolved_${r.id}`),
       セッション: r.shortLabel,
       PRR積算量合計_L: Number(r.totalPrrVolumeL.toFixed(4)),
-      最大ΔBV低下率: r.hasDbv ? Number(r.minDbv.toFixed(1)) : null,
+      最大ΔBV低下率: r.hasDbv && r.minDbv !== null ? Number(r.minDbv.toFixed(1)) : null,
       総除水量_L: r.hasUf ? Number(r.totalUfVolumeL.toFixed(2)) : null,
       収縮期血圧低下量_mmHg: r.hasBp ? r.sysDrop : null,
       ΔBVとPRRの相関係数: r.hasDbv ? r.corrDbvPrr : null,
@@ -896,7 +974,7 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
 
     setGeneratedPrompt(prompt);
     setCopyStatus("idle");
-  }, [sheetResults, overallPatient, presentPatients]);
+  }, [sheetResults]);
 
   const copyPrompt = useCallback(async () => {
     if (!generatedPrompt) return;
@@ -1237,7 +1315,9 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
                         max={active.maxIdx}
                         value={activeBase.rangeStart}
                         onChange={(e) =>
-                          updateRange(activeBase.id, { rangeStart: Math.min(Number(e.target.value), activeBase.rangeEnd - 1) })
+                          updateRange(activeBase.id, {
+                            rangeStart: Math.max(0, Math.min(Number(e.target.value), activeBase.rangeEnd - 1)),
+                          })
                         }
                         style={{ flex: 1, accentColor: "#2DD4BF" }}
                       />
@@ -1250,7 +1330,9 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
                         max={active.maxIdx}
                         value={activeBase.rangeEnd}
                         onChange={(e) =>
-                          updateRange(activeBase.id, { rangeEnd: Math.max(Number(e.target.value), activeBase.rangeStart + 1) })
+                          updateRange(activeBase.id, {
+                            rangeEnd: Math.min(active.maxIdx, Math.max(Number(e.target.value), activeBase.rangeStart + 1)),
+                          })
                         }
                         style={{ flex: 1, accentColor: "#2DD4BF" }}
                       />
@@ -1271,11 +1353,13 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
                   {[
                     ["開始時刻", active.startLabel],
                     ["終了時刻", active.endLabel],
-                    ...(active.hasDbv ? [["最大ΔBV低下", `${active.minDbv.toFixed(1)}% (${active.minDbvTime})`]] : []),
+                    ...(active.hasDbv && active.minDbv !== null
+                      ? [["最大ΔBV低下", `${active.minDbv.toFixed(1)}% (${active.minDbvTime})`]]
+                      : []),
                     ["PRR積算量合計", `${active.totalPrrVolumeL.toFixed(4)} L`],
                     ...(active.hasDbv ? [["ΔBV-PRR相関(r)", corrLabel(active.corrDbvPrr)]] : []),
                     ...(active.hasUf ? [["総除水量", `${active.totalUfVolumeL.toFixed(2)} L`]] : []),
-                    ...(active.hasBp
+                    ...(active.hasBp && active.minSysBp !== null
                       ? [
                           ["最低血圧(収縮期)", `${active.minSysBp} mmHg (${active.minSysBpTime})`],
                           ["血圧低下量(収縮期)", `${active.sysDrop} mmHg`],
@@ -2028,7 +2112,7 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
                       <td style={{ padding: "8px 10px", fontFamily: "'IBM Plex Mono',monospace" }}>{r.startLabel}</td>
                       <td style={{ padding: "8px 10px", fontFamily: "'IBM Plex Mono',monospace" }}>{r.endLabel}</td>
                       <td style={{ padding: "8px 10px", fontFamily: "'IBM Plex Mono',monospace" }}>
-                        {r.hasDbv ? `${r.minDbv.toFixed(1)}% (${r.minDbvTime})` : "-"}
+                        {r.hasDbv && r.minDbv !== null ? `${r.minDbv.toFixed(1)}% (${r.minDbvTime})` : "-"}
                       </td>
                       <td style={{ padding: "8px 10px", fontFamily: "'IBM Plex Mono',monospace", color: "#5EEAD4" }}>
                         {r.totalPrrVolumeL.toFixed(4)} L
@@ -2040,7 +2124,7 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
                         {r.hasUf ? `${r.totalUfVolumeL.toFixed(2)} L` : "-"}
                       </td>
                       <td style={{ padding: "8px 10px", fontFamily: "'IBM Plex Mono',monospace" }}>
-                        {r.hasBp ? `${r.sysDrop} mmHg (${r.minSysBp}まで)` : "-"}
+                        {r.hasBp && r.sysDrop !== null ? `${r.sysDrop} mmHg (${r.minSysBp}まで)` : "-"}
                       </td>
                     </tr>
                   ))}
