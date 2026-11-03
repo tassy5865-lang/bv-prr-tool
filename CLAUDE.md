@@ -10,6 +10,7 @@ npm run dev      # start Vite dev server
 npm run build    # production build to dist/
 npm run preview  # preview the production build locally
 npm run deploy   # build then publish dist/ to the gh-pages branch
+npm run build:artifact  # single-file page for claude.ai Artifact → dist-artifact/bv-prr-tool.html
 ```
 
 There is no test suite and no lint script configured in this project.
@@ -17,6 +18,10 @@ There is no test suite and no lint script configured in this project.
 ### GitHub Pages deployment
 
 `vite.config.js` hardcodes `base: "/bv-prr-tool/"` for GitHub Pages. If the repo is ever renamed/forked, update `base` to match the new repo name before deploying.
+
+### claude.ai Artifact version
+
+The same app is also published as a claude.ai Artifact (https://claude.ai/artifact/5MmrcvtQxVyRywVNqW5JzV, declared capabilities `sample` + `downloads`). `scripts/build-artifact.mjs` runs a Vite build with `base: "./"` and inlines the single JS chunk into one HTML file (no doctype/html/head/body — the platform adds them), dropping the `index.html` CSP meta (it would block the inline script) but keeping its `<style>` block. Republish that file to the same artifact URL after changes. `IN_CLAUDE_ARTIFACT` (true when `window.claude.use` exists at load) switches artifact-only behaviour: print buttons are hidden (`window.print()` does nothing in the viewer), the data export is saved as UTF-8 CSV via `claude.use("downloads")` (`.xls` is not on the download allowlist), and the Claude panel analyses inline (below).
 
 ## Architecture
 
@@ -37,9 +42,14 @@ Key state/UI concepts in `BVPRRAnalyzerApp`:
 - Chart order within the single view is user-draggable and tracked in `chartOrder` state (chart panels render with a CSS `order` from `chartOrder.indexOf(id)`).
 - Missing columns (e.g. no BP data in a given CSV) don't error — `hasDbv`/`hasUf`/`hasBp` flags gate each chart/stat independently so partial data still renders what it can.
 
-### Claude.ai analysis (`buildClaudeAnalysisPrompt` / `analyzeWithClaude`)
+### Claude analysis (`buildClaudeAnalysisPrompt` / `runInlineAnalysis` / `analyzeWithClaude`)
 
-The "overall" view has a "Claude.ai で分析する" button. `buildClaudeAnalysisPrompt(sessions)` (module-level, pure) builds a Japanese analysis-request prompt from the per-session summary values of `sheetResults` (patient names replaced with pseudonyms 患者A/患者B…, keyed by `patientId` or the session `id` when unresolved; data embedded as a compact CSV table, not JSON, to keep the URL short — CSV header names must not contain commas). `analyzeWithClaude` then opens `https://claude.ai/new?q=<encoded prompt>` in a new tab so the prompt is prefilled in the user's own Claude.ai account — no API key, works on GitHub Pages. If the resulting URL exceeds `CLAUDE_PREFILL_URL_MAX` (14000 chars; ~50 sessions fit), it opens `claude.ai/new` without `q` and relies on the clipboard copy instead (`claudeStatus` = `"paste"`, or `"paste-manual"` with the prompt textarea shown if the clipboard write failed). The clipboard write is started before `window.open` (the page must still have focus) and `window.open` is called synchronously in the click handler to avoid popup blockers. "送る内容を確認" shows exactly what will be sent. Prompt/status are reset whenever `sheetResults` changes.
+`buildClaudeAnalysisPrompt(sessions)` (module-level, pure) builds a Japanese analysis-request prompt from the per-session summary values of `sheetResults` (patient names replaced with pseudonyms 患者A/患者B…, keyed by `patientId` or the session `id` when unresolved; data embedded as a compact CSV table, not JSON, to keep the URL short — CSV header names must not contain commas). The overall view's Claude panel then works in one of two modes:
+
+- **Inline (claude.ai Artifact)**: when `window.claude.use("sample")` resolves a function, "Claude で分析する" calls it on the viewer's own Claude account (`modelTier: "default"`, 5-minute cache; "もう一度分析する" passes `refresh: true`), streams the answer into `analysis.text` via `onText`, offers a Stop button (AbortController in `analysisCtlRef`), and renders the Markdown with `MarkdownView` (a small React renderer — headings, lists, tables, bold/code; never `dangerouslySetInnerHTML`). The finished answer is also printed in the overall PDF report (`.report-analysis`). Error codes map to messages in `sampleErrorInfo`; `not_granted`/`sampling_disabled`/etc. set `sampleUnavailable`, which falls back to the second mode.
+- **Open claude.ai (GitHub Pages, or fallback)**: `analyzeWithClaude` opens `https://claude.ai/new?q=<encoded prompt>` in a new tab so the prompt is prefilled. If the URL exceeds `CLAUDE_PREFILL_URL_MAX` (14000 chars; ~50 sessions fit), it opens `claude.ai/new` without `q` and relies on the clipboard copy instead (`claudeStatus` = `"paste"`, or `"paste-manual"` with the prompt textarea shown if the clipboard write failed). The clipboard write is started before `window.open` (the page must still have focus) and `window.open` is called synchronously in the click handler to avoid popup blockers.
+
+"送る内容を確認" shows exactly what will be sent. Prompt/status/analysis are reset (and a running analysis aborted) whenever `sheetResults` changes.
 
 ### PDF report (browser print)
 

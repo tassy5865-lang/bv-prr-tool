@@ -483,7 +483,14 @@ function xmlRow(values) {
   return `<Row>${values.map(xmlCell).join("")}</Row>`;
 }
 
-function downloadExcel(filename, derived) {
+// claude.ai のアーティファクトとして表示されているか（ビューア内では window.claude.use が最初から存在する）。
+// アーティファクトの表示枠では印刷と <a download> が効かないため、PDF出力は隠し、保存は downloads 機能で行う。
+const IN_CLAUDE_ARTIFACT =
+  typeof window !== "undefined" && Boolean(window.claude && typeof window.claude.use === "function");
+
+// downloads を渡すと（アーティファクト内）、同じ表を UTF-8(BOM付き) CSV として保存ダイアログに渡す。
+// アーティファクトで保存できる拡張子に .xls が無いため。戻り値は保存処理の Promise。
+function downloadExcel(filename, derived, downloads) {
   const header = [
     "hour",
     "min",
@@ -498,6 +505,31 @@ function downloadExcel(filename, derived) {
     "収縮期血圧[mmHg]",
     "拡張期血圧[mmHg]",
   ];
+  if (downloads) {
+    const csvCell = (v) => {
+      if (v === null || v === undefined || (typeof v === "number" && Number.isNaN(v))) return "";
+      const str = String(v);
+      return /[",\n]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str;
+    };
+    const lines = [header, ...derived.rows.map((r) => [
+      r.hour,
+      r.min,
+      r.sec,
+      r.treatTimeSec,
+      r.raw,
+      r.prrInstant,
+      r.prrIntervalVolumeL,
+      r.dbvPercent,
+      r.ufSpeedLh,
+      r.ufVolumeL,
+      r.sysBp,
+      r.diaBp,
+    ])].map((cells) => cells.map(csvCell).join(","));
+    return downloads.save({
+      filename: filename.replace(/\.csv$/i, "") + "_BV_PRR分析.csv",
+      data: "\uFEFF" + lines.join("\r\n"),
+    });
+  }
   const rowsXml = [xmlRow(header)];
   derived.rows.forEach((r) => {
     rowsXml.push(
@@ -538,6 +570,7 @@ ${rowsXml.join("\n")}
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
+  return Promise.resolve();
 }
 
 // ---------- デモデータ生成（実データと同じCSV列を持つサンプルをその場で作成し、通常のアップロード処理に流す） ----------
@@ -682,6 +715,182 @@ ${rows.join("\n")}
 - 相関_除水速度-PRR: 除水速度の変化とPRRの連動性`;
 }
 
+// Claude の回答（Markdown）を表示する簡易レンダラー。
+// 見出し・箇条書き・番号付きリスト・表・太字・コードだけを扱い、HTMLとしては解釈しない（XSS対策）。
+function renderInlineMarkdown(text, keyPrefix) {
+  return text.split(/(\*\*[^*]+\*\*|`[^`]+`)/g).map((part, i) => {
+    const key = `${keyPrefix}-${i}`;
+    if (part.startsWith("**") && part.endsWith("**") && part.length > 4) {
+      return <strong key={key}>{part.slice(2, -2)}</strong>;
+    }
+    if (part.startsWith("`") && part.endsWith("`") && part.length > 2) {
+      return (
+        <code key={key} style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: "0.92em" }}>
+          {part.slice(1, -1)}
+        </code>
+      );
+    }
+    return part;
+  });
+}
+
+function MarkdownView({ text, accent = "#F0A585", muted = "#8B9CB3", border = "#202B3D" }) {
+  const lines = text.replace(/\r\n/g, "\n").split("\n");
+  const blocks = [];
+  let i = 0;
+  const isTableLine = (l) => /^\s*\|.*\|\s*$/.test(l);
+  const splitRow = (l) =>
+    l
+      .trim()
+      .replace(/^\|/, "")
+      .replace(/\|$/, "")
+      .split("|")
+      .map((c) => c.trim());
+  while (i < lines.length) {
+    const line = lines[i];
+    const key = `b${i}`;
+    if (!line.trim()) {
+      i++;
+      continue;
+    }
+    const h = line.match(/^(#{1,4})\s+(.*)$/);
+    if (h) {
+      const level = h[1].length;
+      const size = level === 1 ? 16 : level === 2 ? 14.5 : 13.5;
+      blocks.push(
+        <div
+          key={key}
+          style={{
+            fontSize: size,
+            fontWeight: 700,
+            color: level <= 2 ? accent : undefined,
+            margin: blocks.length ? "16px 0 6px" : "0 0 6px",
+            breakAfter: "avoid",
+          }}
+        >
+          {renderInlineMarkdown(h[2], key)}
+        </div>
+      );
+      i++;
+      continue;
+    }
+    if (/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) {
+      blocks.push(<hr key={key} style={{ border: "none", borderTop: `1px solid ${border}`, margin: "12px 0" }} />);
+      i++;
+      continue;
+    }
+    if (isTableLine(line)) {
+      const rows = [];
+      while (i < lines.length && isTableLine(lines[i])) {
+        const cells = splitRow(lines[i]);
+        // 区切り行（|---|:---:|）は読み飛ばす
+        if (!cells.every((c) => /^:?-{2,}:?$/.test(c))) rows.push(cells);
+        i++;
+      }
+      const [head, ...body] = rows;
+      blocks.push(
+        <div key={key} style={{ overflowX: "auto", margin: "8px 0" }}>
+          <table className="report-table" style={{ borderCollapse: "collapse", fontSize: 12, width: "100%" }}>
+            {head && (
+              <thead>
+                <tr>
+                  {head.map((c, j) => (
+                    <th key={j} style={{ textAlign: "left", padding: "5px 8px", borderBottom: `1px solid ${border}`, color: muted, fontWeight: 600 }}>
+                      {renderInlineMarkdown(c, `${key}-h${j}`)}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+            )}
+            <tbody>
+              {body.map((r, ri) => (
+                <tr key={ri}>
+                  {r.map((c, j) => (
+                    <td key={j} style={{ padding: "5px 8px", borderBottom: `1px solid ${border}`, verticalAlign: "top" }}>
+                      {renderInlineMarkdown(c, `${key}-${ri}-${j}`)}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      );
+      continue;
+    }
+    const listMatch = (l) => l.match(/^(\s*)([-*・]|\d+[.)])\s+(.*)$/);
+    if (listMatch(line)) {
+      const ordered = /\d/.test(listMatch(line)[2]);
+      const items = [];
+      while (i < lines.length && listMatch(lines[i])) {
+        const m = listMatch(lines[i]);
+        items.push({ indent: m[1].length >= 2 ? 1 : 0, text: m[3] });
+        i++;
+      }
+      const ListTag = ordered ? "ol" : "ul";
+      blocks.push(
+        <ListTag key={key} style={{ margin: "4px 0 8px", paddingLeft: 22 }}>
+          {items.map((it, j) => (
+            <li key={j} style={{ marginLeft: it.indent ? 18 : 0, marginBottom: 3 }}>
+              {renderInlineMarkdown(it.text, `${key}-${j}`)}
+            </li>
+          ))}
+        </ListTag>
+      );
+      continue;
+    }
+    // 段落: 次の空行・見出し・リスト・表までをまとめる
+    const para = [];
+    while (
+      i < lines.length &&
+      lines[i].trim() &&
+      !/^#{1,4}\s/.test(lines[i]) &&
+      !isTableLine(lines[i]) &&
+      !listMatch(lines[i])
+    ) {
+      para.push(lines[i].trim());
+      i++;
+    }
+    blocks.push(
+      <p key={key} style={{ margin: "0 0 8px" }}>
+        {para.map((l, j) => (
+          <React.Fragment key={j}>
+            {j > 0 && <br />}
+            {renderInlineMarkdown(l, `${key}-${j}`)}
+          </React.Fragment>
+        ))}
+      </p>
+    );
+  }
+  return <div style={{ fontSize: 13, lineHeight: 1.8 }}>{blocks}</div>;
+}
+
+// sample(Claude呼び出し)の失敗コード → 画面の案内文。
+// fallback: true のものは、このビューではページ内分析が使えないため Claude.ai を開く方式に切り替える。
+function sampleErrorInfo(code) {
+  switch (code) {
+    case "not_granted":
+      return { fallback: true, message: "Claude の利用が許可されませんでした。代わりに Claude.ai を新しいタブで開いて分析できます。" };
+    case "sampling_disabled":
+    case "not_declared":
+    case "capability_disabled":
+    case "capability_removed":
+      return { fallback: true, message: "この画面では Claude を呼び出せません。代わりに Claude.ai を新しいタブで開いて分析できます。" };
+    case "rate_limited":
+      return { message: "Claude の利用回数の上限に達しました。しばらく時間をおいてから、もう一度お試しください。" };
+    case "session_expired":
+      return { message: "Claude.ai のログインが切れています。ログインし直してから、もう一度お試しください。" };
+    case "prompt_too_large":
+      return { message: "セッション数が多すぎて一度に分析できません。患者タブ・曜日タブで絞り込んでから、もう一度お試しください。" };
+    case "refused":
+      return { message: "この内容では分析の回答が得られませんでした。" };
+    case "empty_completion":
+      return { message: "回答が空でした。もう一度お試しください。" };
+    default:
+      return { message: "通信エラーなどで分析が中断されました。もう一度お試しください。" };
+  }
+}
+
 // PDFレポート（印刷）専用のヘッダー。画面には出さず、印刷時のみ表示する。
 // meta は [ラベル, 値] の配列で、最大4列のグリッドに並べる。
 function ReportHeader({ title, subtitle, meta, style }) {
@@ -748,27 +957,29 @@ function ScopeTabs({
 }) {
   return (
     <>
-      <div className="no-print" style={{ marginBottom: 16 }}>
-        <button
-          onClick={() => window.print()}
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 8,
-            background: "#1B2536",
-            color: "#E7ECF3",
-            border: "1px solid #2A3548",
-            borderRadius: 9,
-            padding: "9px 16px",
-            fontSize: 13,
-            fontWeight: 500,
-            cursor: "pointer",
-          }}
-        >
-          <Printer size={15} />
-          PDFレポート出力（印刷）
-        </button>
-      </div>
+      {!IN_CLAUDE_ARTIFACT && (
+        <div className="no-print" style={{ marginBottom: 16 }}>
+          <button
+            onClick={() => window.print()}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              background: "#1B2536",
+              color: "#E7ECF3",
+              border: "1px solid #2A3548",
+              borderRadius: 9,
+              padding: "9px 16px",
+              fontSize: 13,
+              fontWeight: 500,
+              cursor: "pointer",
+            }}
+          >
+            <Printer size={15} />
+            PDFレポート出力（印刷）
+          </button>
+        </div>
+      )}
 
       {/* 患者別シート切り替え */}
       {presentPatients.length > 1 && (
@@ -1071,11 +1282,56 @@ export default function BVPRRAnalyzerApp() {
   // Claude.aiを開いた結果: null | "prefilled"(入力欄に自動入力) | "paste"(貼り付けが必要) | "paste-manual"(コピーも失敗)
   const [claudeStatus, setClaudeStatus] = useState(null);
 
-  // 絞り込み中のセッションが変わったら、古いプロンプト・案内は消す
+  // claude.ai のアーティファクトとして開かれている場合だけ、閲覧者自身のClaudeアカウントで
+  // その場で分析できる（window.claude.use("sample")）。GitHub Pages など他の場所では null のまま。
+  const [claudeSample, setClaudeSample] = useState(null);
+  const [sampleUnavailable, setSampleUnavailable] = useState(false); // 許可されなかった等 → Claude.aiを開く方式へ
+  // status: "idle" | "thinking"(回答待ち) | "streaming" | "done" | "stopped" | "error"
+  const [analysis, setAnalysis] = useState({ status: "idle", text: "", truncated: false, error: null });
+  const analysisCtlRef = useRef(null);
+  const [resultCopyStatus, setResultCopyStatus] = useState("idle");
+
+  React.useEffect(() => {
+    let alive = true;
+    const c = typeof window !== "undefined" ? window.claude : undefined;
+    if (!c || typeof c.use !== "function") return undefined;
+    c.use("sample")
+      .then((fn) => {
+        if (alive && typeof fn === "function") setClaudeSample(() => fn);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const inlineAnalysis = Boolean(claudeSample) && !sampleUnavailable;
+
+  // アーティファクト内でのファイル保存（downloads 機能）。使えない場合は null のまま（保存ボタンを隠す）
+  const [claudeDownloads, setClaudeDownloads] = useState(null);
+  const [downloadError, setDownloadError] = useState(null);
+  React.useEffect(() => {
+    if (!IN_CLAUDE_ARTIFACT) return undefined;
+    let alive = true;
+    window.claude
+      .use("downloads")
+      .then((ns) => {
+        if (alive && ns) setClaudeDownloads(ns);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // 絞り込み中のセッションが変わったら、古いプロンプト・案内・分析結果は消す（実行中の分析は止める）
   React.useEffect(() => {
     setGeneratedPrompt(null);
     setShowPrompt(false);
     setClaudeStatus(null);
+    if (analysisCtlRef.current) analysisCtlRef.current.abort();
+    analysisCtlRef.current = null;
+    setAnalysis({ status: "idle", text: "", truncated: false, error: null });
   }, [sheetResults]);
 
   const buildAnalysisPrompt = useCallback(() => buildClaudeAnalysisPrompt(sheetResults), [sheetResults]);
@@ -1115,6 +1371,61 @@ export default function BVPRRAnalyzerApp() {
       });
     }
   }, [buildAnalysisPrompt]);
+
+  // ページ内でClaudeに分析させ、回答を流れるように表示する（claude.ai アーティファクト内のみ）
+  const runInlineAnalysis = useCallback(
+    async (regenerate = false) => {
+      if (!claudeSample) return;
+      const prompt = buildAnalysisPrompt();
+      setGeneratedPrompt(prompt);
+      if (analysisCtlRef.current) analysisCtlRef.current.abort();
+      const ctl = new AbortController();
+      analysisCtlRef.current = ctl;
+      setAnalysis({ status: "thinking", text: "", truncated: false, error: null });
+      try {
+        const { text, truncated } = await claudeSample(prompt, {
+          signal: ctl.signal,
+          modelTier: "default",
+          // 同じ内容の再実行は5分間キャッシュを再生。「もう一度分析」は新しく聞き直してキャッシュを更新する
+          cache: regenerate ? { gcTime: 300000, refresh: true } : { gcTime: 300000 },
+          onText: ({ text: soFar }) => {
+            if (analysisCtlRef.current === ctl) setAnalysis((a) => ({ ...a, status: "streaming", text: soFar }));
+          },
+        });
+        if (analysisCtlRef.current === ctl) {
+          setAnalysis({ status: "done", text, truncated, error: null });
+          analysisCtlRef.current = null;
+        }
+      } catch (e) {
+        if (analysisCtlRef.current !== ctl) return; // 絞り込み変更などで破棄された呼び出し
+        analysisCtlRef.current = null;
+        const code = e && e.code;
+        if (code === "cancelled") {
+          setAnalysis((a) => ({ ...a, status: a.text ? "stopped" : "idle" }));
+          return;
+        }
+        const info = sampleErrorInfo(code);
+        if (info.fallback) setSampleUnavailable(true);
+        // refused の場合は途中までの回答も取り下げる（e.text なし）
+        setAnalysis({ status: "error", text: code === "refused" ? "" : (e && e.text) || "", truncated: false, error: info.message });
+      }
+    },
+    [claudeSample, buildAnalysisPrompt]
+  );
+
+  const stopInlineAnalysis = useCallback(() => {
+    if (analysisCtlRef.current) analysisCtlRef.current.abort();
+  }, []);
+
+  const copyAnalysisResult = useCallback(async () => {
+    if (!analysis.text) return;
+    if (await writeClipboard(analysis.text)) {
+      setResultCopyStatus("copied");
+      setTimeout(() => setResultCopyStatus("idle"), 2000);
+    }
+  }, [analysis.text]);
+
+  const analysisRunning = analysis.status === "thinking" || analysis.status === "streaming";
 
   const togglePrompt = useCallback(() => {
     if (!showPrompt && !generatedPrompt) setGeneratedPrompt(buildAnalysisPrompt());
@@ -2155,44 +2466,64 @@ export default function BVPRRAnalyzerApp() {
 
                 {/* ダウンロード */}
                 <div className="no-print" style={{ order: 100, display: "flex", gap: 10, flexWrap: "wrap" }}>
-                  <button
-                    onClick={() => downloadExcel(active.filename, active)}
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 8,
-                      background: "#0F766E",
-                      color: "#E7ECF3",
-                      border: "none",
-                      borderRadius: 9,
-                      padding: "10px 16px",
-                      fontSize: 13.5,
-                      fontWeight: 500,
-                      cursor: "pointer",
-                    }}
-                  >
-                    <Download size={15} />
-                    抽出済みデータ(BV+PRR)をExcelでダウンロード
-                  </button>
-                  <button
-                    onClick={() => window.print()}
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 8,
-                      background: "#1B2536",
-                      color: "#E7ECF3",
-                      border: "1px solid #2A3548",
-                      borderRadius: 9,
-                      padding: "10px 16px",
-                      fontSize: 13.5,
-                      fontWeight: 500,
-                      cursor: "pointer",
-                    }}
-                  >
-                    <Printer size={15} />
-                    PDFレポート出力（印刷）
-                  </button>
+                  {(!IN_CLAUDE_ARTIFACT || claudeDownloads) && (
+                    <button
+                      onClick={() => {
+                        setDownloadError(null);
+                        downloadExcel(active.filename, active, IN_CLAUDE_ARTIFACT ? claudeDownloads : null).catch((e) => {
+                          const code = e && e.code;
+                          if (code === "declined") return;
+                          setDownloadError(
+                            code === "rate_limited"
+                              ? "保存の確認画面がすでに開いています。少し待ってからもう一度お試しください。"
+                              : "この画面ではファイルを保存できませんでした。"
+                          );
+                        });
+                      }}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 8,
+                        background: "#0F766E",
+                        color: "#E7ECF3",
+                        border: "none",
+                        borderRadius: 9,
+                        padding: "10px 16px",
+                        fontSize: 13.5,
+                        fontWeight: 500,
+                        cursor: "pointer",
+                      }}
+                    >
+                      <Download size={15} />
+                      {IN_CLAUDE_ARTIFACT ? "抽出済みデータ(BV+PRR)をCSVで保存" : "抽出済みデータ(BV+PRR)をExcelでダウンロード"}
+                    </button>
+                  )}
+                  {!IN_CLAUDE_ARTIFACT && (
+                    <button
+                      onClick={() => window.print()}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 8,
+                        background: "#1B2536",
+                        color: "#E7ECF3",
+                        border: "1px solid #2A3548",
+                        borderRadius: 9,
+                        padding: "10px 16px",
+                        fontSize: 13.5,
+                        fontWeight: 500,
+                        cursor: "pointer",
+                      }}
+                    >
+                      <Printer size={15} />
+                      PDFレポート出力（印刷）
+                    </button>
+                  )}
+                  {downloadError && (
+                    <div role="alert" style={{ flexBasis: "100%", fontSize: 11.5, color: "#FBBF24" }}>
+                      {downloadError}
+                    </div>
+                  )}
                 </div>
               </div>
             )}
@@ -2487,9 +2818,11 @@ export default function BVPRRAnalyzerApp() {
                     Claude で総合分析
                   </div>
                   <div style={{ fontSize: 11.5, color: "#8B9CB3", marginTop: 2 }}>
-                    {overallPatient === "all" && overallSheet === "all"
-                      ? `読み込んだ${sheetResults.length}件のセッションを、Claude.ai で専門的に分析します`
-                      : `${scopeLabel}の${sheetResults.length}件のセッションを、Claude.ai で専門的に分析します`}
+                    {`${overallPatient === "all" && overallSheet === "all" ? "読み込んだ" : `${scopeLabel}の`}${
+                      sheetResults.length
+                    }件のセッションを、${
+                      inlineAnalysis ? "Claude で分析して結果をこの画面に表示します" : "Claude.ai で専門的に分析します"
+                    }`}
                   </div>
                 </div>
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
@@ -2509,28 +2842,152 @@ export default function BVPRRAnalyzerApp() {
                   >
                     {showPrompt ? "送る内容を閉じる" : "送る内容を確認"}
                   </button>
-                  <button
-                    onClick={analyzeWithClaude}
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 7,
-                      background: "#C96442",
-                      color: "#FFFFFF",
-                      border: "none",
-                      borderRadius: 9,
-                      padding: "9px 16px",
-                      fontSize: 12.5,
-                      fontWeight: 600,
-                      cursor: "pointer",
-                      whiteSpace: "nowrap",
-                    }}
-                  >
-                    <ExternalLink size={14} />
-                    Claude.ai で分析する
-                  </button>
+                  {inlineAnalysis ? (
+                    analysisRunning ? (
+                      <button
+                        onClick={stopInlineAnalysis}
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 7,
+                          background: "#1B2536",
+                          color: "#E7ECF3",
+                          border: "1px solid #2A3548",
+                          borderRadius: 9,
+                          padding: "9px 16px",
+                          fontSize: 12.5,
+                          fontWeight: 600,
+                          cursor: "pointer",
+                          whiteSpace: "nowrap",
+                        }}
+                      >
+                        <X size={14} />
+                        分析を止める
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() => runInlineAnalysis(analysis.status === "done")}
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 7,
+                          background: "#C96442",
+                          color: "#FFFFFF",
+                          border: "none",
+                          borderRadius: 9,
+                          padding: "9px 16px",
+                          fontSize: 12.5,
+                          fontWeight: 600,
+                          cursor: "pointer",
+                          whiteSpace: "nowrap",
+                        }}
+                      >
+                        <Sparkles size={14} />
+                        {analysis.status === "idle" ? "Claude で分析する" : "もう一度分析する"}
+                      </button>
+                    )
+                  ) : (
+                    <button
+                      onClick={analyzeWithClaude}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 7,
+                        background: "#C96442",
+                        color: "#FFFFFF",
+                        border: "none",
+                        borderRadius: 9,
+                        padding: "9px 16px",
+                        fontSize: 12.5,
+                        fontWeight: 600,
+                        cursor: "pointer",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      <ExternalLink size={14} />
+                      Claude.ai で分析する
+                    </button>
+                  )}
                 </div>
               </div>
+
+              {/* ページ内分析の結果 */}
+              {(analysis.status !== "idle" || analysis.error) && (
+                <div style={{ marginTop: 16 }}>
+                  {analysis.error && (
+                    <div
+                      role="alert"
+                      style={{
+                        fontSize: 12,
+                        lineHeight: 1.7,
+                        color: "#FBBF24",
+                        background: "rgba(245,158,11,0.08)",
+                        border: "1px solid rgba(245,158,11,0.3)",
+                        borderRadius: 8,
+                        padding: "9px 12px",
+                        marginBottom: analysis.text ? 12 : 0,
+                      }}
+                    >
+                      {analysis.error}
+                    </div>
+                  )}
+                  {analysis.status === "thinking" && (
+                    <div role="status" style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, color: "#F0A585" }}>
+                      <Sparkles size={14} className="bvprr-pulse" />
+                      Claude が分析しています…（回答が出始めるまで数十秒かかることがあります）
+                    </div>
+                  )}
+                  {analysis.text && (
+                    <div
+                      style={{
+                        background: "#0F1826",
+                        border: "1px solid #202B3D",
+                        borderRadius: 10,
+                        padding: "16px 18px",
+                        color: "#E7ECF3",
+                      }}
+                    >
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, marginBottom: 10 }}>
+                        <div style={{ fontSize: 11.5, color: "#8B9CB3" }}>
+                          {analysis.status === "streaming" && "回答を受信中…"}
+                          {analysis.status === "done" && "Claude による分析結果（PDFレポートにも出力されます）"}
+                          {analysis.status === "stopped" && "途中で止めた分析結果です"}
+                          {analysis.status === "error" && "途中までの分析結果です"}
+                        </div>
+                        {!analysisRunning && (
+                          <button
+                            onClick={copyAnalysisResult}
+                            style={{
+                              display: "flex",
+                              alignItems: "center",
+                              gap: 6,
+                              background: resultCopyStatus === "copied" ? "#0F766E" : "#1B2536",
+                              color: "#E7ECF3",
+                              border: "1px solid #2A3548",
+                              borderRadius: 8,
+                              padding: "5px 11px",
+                              fontSize: 11.5,
+                              fontWeight: 500,
+                              cursor: "pointer",
+                              whiteSpace: "nowrap",
+                              flexShrink: 0,
+                            }}
+                          >
+                            {resultCopyStatus === "copied" ? <Check size={12} /> : <Copy size={12} />}
+                            {resultCopyStatus === "copied" ? "コピーしました" : "結果をコピー"}
+                          </button>
+                        )}
+                      </div>
+                      <MarkdownView text={analysis.text} />
+                      {analysis.truncated && (
+                        <div style={{ marginTop: 8, fontSize: 11, color: "#FBBF24" }}>
+                          ※ 回答が長すぎたため途中で切れています。患者タブ・曜日タブで対象を絞ると、最後まで出やすくなります。
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
 
               {claudeStatus && (
                 <div
@@ -2559,7 +3016,7 @@ export default function BVPRRAnalyzerApp() {
                 <div style={{ marginTop: 16 }}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, marginBottom: 6 }}>
                     <div style={{ fontSize: 11.5, color: "#8B9CB3" }}>
-                      Claude.ai に送られる内容です（患者名は仮名、数値はセッションごとの集計値のみ）
+                      Claude に送られる内容です（患者名は仮名、数値はセッションごとの集計値のみ）
                     </div>
                     <button
                       onClick={copyPrompt}
@@ -2606,7 +3063,10 @@ export default function BVPRRAnalyzerApp() {
               )}
 
               <div style={{ marginTop: 12, fontSize: 10, color: "#4A5670", lineHeight: 1.6 }}>
-                ※ 分析には Claude.ai へのログインが必要です。送られるのはセッションごとの集計値だけで、患者名は「患者A」などの仮名に置き換えています（グラフの元データや実名は送りません）。
+                ※ {inlineAnalysis
+                  ? "分析はご自身の Claude.ai アカウントの利用枠で行われます（初回は利用の許可を求められます）。"
+                  : "分析には Claude.ai へのログインが必要です。"}
+                送られるのはセッションごとの集計値だけで、患者名は「患者A」などの仮名に置き換えています（グラフの元データや実名は送りません）。
                 外部サービスへのデータ送信は施設のルールに従ってください。
                 <br />
                 ※ Claude の回答はデータの傾向の読み取りであり、医学的診断や治療方針の決定ではありません。実際の対応は必ず医療スタッフの判断で行ってください。
@@ -2791,6 +3251,20 @@ export default function BVPRRAnalyzerApp() {
                 </>
               );
             })()}
+
+            {/* Claude による分析結果（印刷時のみ。画面では上の分析パネルに表示） */}
+            {analysis.text && !analysisRunning && (
+              <div className="print-only report-analysis" style={{ marginTop: 18, border: "1px solid", borderRadius: 10, padding: "12px 14px" }}>
+                <div className="report-accent" style={{ fontSize: 13, fontWeight: 700, marginBottom: 8 }}>
+                  Claude による分析（参考）
+                </div>
+                <MarkdownView text={analysis.text} />
+                <div style={{ marginTop: 8, fontSize: 8.5 }}>
+                  ※ AI（Claude）がセッションの集計値のみから読み取った傾向です。医学的判断は医師・医療スタッフが行ってください。
+                  {analysis.status !== "done" && " この分析は途中で中断されたものです。"}
+                </div>
+              </div>
+            )}
             <ReportFooter />
           </div>
         )}
