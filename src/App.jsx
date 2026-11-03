@@ -29,6 +29,8 @@ import {
   Copy,
   Check,
   Printer,
+  ExternalLink,
+  Sparkles,
 } from "lucide-react";
 
 // ---------- CSV / エンコーディング処理 ----------
@@ -608,6 +610,133 @@ function bpDot(color, changedKey) {
   };
 }
 
+// ---------- Claude.ai での総合分析 ----------
+
+const CLAUDE_NEW_CHAT_URL = "https://claude.ai/new";
+// claude.ai/new?q=... の URL がこれより長くなる場合は自動入力せず、クリップボード経由の貼り付けに切り替える
+// （長すぎるURLはサーバー側で拒否されることがあるため、余裕を持たせた値）
+const CLAUDE_PREFILL_URL_MAX = 14000;
+
+// 分析依頼プロンプトを組み立てる。Claude.ai（外部サービス）に送るため、
+// 実患者名は送らず仮名（患者A/患者B...）に置き換え、送るのはセッションごとの集計値のみ。
+// URLに載せて自動入力する都合上、データはJSONではなく短いCSV表にしている。
+function buildClaudeAnalysisPrompt(sessions) {
+  // patientId は AX列の患者名 → ファイル名由来のIDの順で解決するが、どちらも取れない
+  // セッションは patientId が null になるため、そのままキーにすると別患者同士が
+  // 同じ仮名に統合されてしまう。null の場合はセッション固有の id をキーにして分離する。
+  const anonLabels = new Map();
+  const anonKey = (r) => r.patientId ?? `__unresolved_${r.id}`;
+  sessions.forEach((r) => {
+    const key = anonKey(r);
+    if (!anonLabels.has(key)) {
+      const n = anonLabels.size;
+      // 27人目以降は 患者AA, 患者AB... のように続ける
+      const label = n < 26 ? String.fromCharCode(65 + n) : `${String.fromCharCode(64 + Math.floor(n / 26))}${String.fromCharCode(65 + (n % 26))}`;
+      anonLabels.set(key, `患者${label}`);
+    }
+  });
+  // 絞り込み後のセッションに実際に何人分の患者が含まれているかで判定する
+  const multiPatient = anonLabels.size > 1;
+
+  const fmt = (v, digits) => (v === null || v === undefined || Number.isNaN(v) ? "" : Number(v).toFixed(digits));
+  const header = ["患者", "日時", "曜日", "PRR積算量L", "最大ΔBV%", "総除水量L", "収縮期血圧低下mmHg", "相関_ΔBV-PRR", "相関_除水速度-PRR"];
+  const rows = sessions.map((r) =>
+    [
+      anonLabels.get(anonKey(r)),
+      r.shortLabel,
+      r.weekdayLabel ?? "",
+      fmt(r.totalPrrVolumeL, 3),
+      r.hasDbv ? fmt(r.minDbv, 1) : "",
+      r.hasUf ? fmt(r.totalUfVolumeL, 2) : "",
+      r.hasBp && r.sysDrop !== null ? String(r.sysDrop) : "",
+      r.hasDbv ? fmt(r.corrDbvPrr, 2) : "",
+      r.hasUf ? fmt(r.corrUfPrr, 2) : "",
+    ]
+      .map((v) => String(v).replace(/[,\n]/g, " "))
+      .join(",")
+  );
+
+  return `あなたは血液透析の除水と血漿再充填（プラズマリフィリング）を専門にレビューする臨床工学技士です。
+以下は${multiPatient ? "複数患者" : "同一患者"}の透析セッション${sessions.length}件の集計値です（日時の昇順）。${
+    multiPatient ? "患者ごとの傾向の違いにも注意してください。" : ""
+  }
+このデータだけをもとに、次の観点で分析してください。
+
+1. PRR・ΔBVの全体傾向と、セッションを追った経時変化
+2. セッション間のばらつきと考えられる要因
+3. 除水速度・除水量とΔBV/PRRの関係から見た血漿再充填能力
+4. 血圧低下とΔBVの関連から示唆される循環動態への影響
+5. 特に注意が必要なセッションとその根拠
+6. 次回以降の除水条件（除水速度・除水プログラム等）を検討する上での実務的な示唆
+
+出力: 見出し付きの日本語。数値の正常/異常を医学的に断定せず「データから読み取れる傾向」として書き、診断や治療方針は医師が決める前提で、臨床工学技士が設定検討に使える視点でまとめてください。
+
+データ（CSV、空欄は測定なし）:
+${header.join(",")}
+${rows.join("\n")}
+
+項目の意味:
+- PRR積算量L: 治療中の血漿再充填の推定合計量
+- 最大ΔBV%: 循環血液量変化率の最小値（マイナスが大きいほど血液濃縮）
+- 相関_ΔBV-PRR: 相関係数r。負の相関が強いほど、除水に血漿再充填が追いついていない可能性
+- 相関_除水速度-PRR: 除水速度の変化とPRRの連動性`;
+}
+
+// PDFレポート（印刷）専用のヘッダー。画面には出さず、印刷時のみ表示する。
+// meta は [ラベル, 値] の配列で、最大4列のグリッドに並べる。
+function ReportHeader({ title, subtitle, meta, style }) {
+  return (
+    <div className="print-only" style={{ marginBottom: 14, ...style }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", gap: 12 }}>
+        <div>
+          <div className="report-accent" style={{ fontSize: 9, fontWeight: 600, letterSpacing: "0.12em" }}>
+            DIALYSIS BV / PRR REPORT
+          </div>
+          <div style={{ fontSize: 17, fontWeight: 700, marginTop: 2 }}>{title}</div>
+          {subtitle && <div style={{ fontSize: 10.5, marginTop: 2 }}>{subtitle}</div>}
+        </div>
+        <div style={{ fontSize: 9, textAlign: "right", whiteSpace: "nowrap" }}>
+          作成日時
+          <br />
+          {new Date().toLocaleString("ja-JP")}
+        </div>
+      </div>
+      <div className="report-rule" style={{ height: 2, marginTop: 8, marginBottom: 10 }} />
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: `repeat(${Math.min(meta.length, 4)}, minmax(0, 1fr))`,
+          gap: 6,
+        }}
+      >
+        {meta.map(([label, value]) => (
+          <div
+            key={label}
+            className="report-meta-cell"
+            style={{ border: "1px solid", borderRadius: 6, padding: "5px 8px", minWidth: 0 }}
+          >
+            <div style={{ fontSize: 8, letterSpacing: "0.04em" }}>{label}</div>
+            <div style={{ fontSize: 10.5, fontWeight: 600, marginTop: 1, overflowWrap: "anywhere" }}>{value}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// PDFレポート（印刷）専用のフッター（注意書き）
+function ReportFooter({ style }) {
+  return (
+    <div
+      className="print-only"
+      style={{ marginTop: 14, paddingTop: 8, borderTop: "1px solid", fontSize: 8.5, lineHeight: 1.6, ...style }}
+    >
+      ※ 本レポートは透析装置ログ(CSV)から自動抽出した数値の可視化であり、医学的診断や治療方針を示すものではありません。
+      実際の対応は必ず医師・医療スタッフの判断で行ってください。
+    </div>
+  );
+}
+
 // compare/overall両ビューで共通の「印刷ボタン＋患者タブ＋曜日タブ」ブロック
 function ScopeTabs({
   presentPatients,
@@ -863,11 +992,15 @@ export default function BVPRRAnalyzerApp() {
     setOverallPatient(key);
     setOverallSheet("all");
     setGeneratedPrompt(null);
+    setShowPrompt(false);
+    setClaudeStatus(null);
     setCopyStatus("idle");
   };
   const selectSheet = (key) => {
     setOverallSheet(key);
     setGeneratedPrompt(null);
+    setShowPrompt(false);
+    setClaudeStatus(null);
     setCopyStatus("idle");
   };
 
@@ -916,74 +1049,84 @@ export default function BVPRRAnalyzerApp() {
     overallSheet === "all" ? "全曜日" : `${overallSheet}曜日`
   }`;
 
-  const [generatedPrompt, setGeneratedPrompt] = useState(null);
-  const [copyStatus, setCopyStatus] = useState("idle"); // "idle" | "copied"
+  // 比較表に「患者」列を出すか（表示中のセッションに2名以上の患者が含まれる場合のみ）
+  const compareShowsPatient = useMemo(
+    () => new Set(sheetResults.map((r) => r.patientLabel)).size > 1,
+    [sheetResults]
+  );
 
-  const generateAnalysisPrompt = useCallback(() => {
-    // 外部AIチャットに貼り付けて使う想定のため、実患者名は送信せず仮名(患者A/患者B...)に置き換える
-    // patientId は AX列の患者名 → ファイル名由来のIDの順で解決するが、どちらも取れない
-    // セッションは patientId が null になるため、そのままキーにすると別患者同士が
-    // 同じ仮名に統合されてしまう。null の場合はセッション固有の id をキーにして分離する。
-    const anonLabels = new Map();
-    sheetResults.forEach((r) => {
-      const key = r.patientId ?? `__unresolved_${r.id}`;
-      if (!anonLabels.has(key)) {
-        anonLabels.set(key, `患者${String.fromCharCode(65 + anonLabels.size)}`);
-      }
-    });
-    // 患者タブ/曜日タブで絞り込んだ結果(sheetResults)に実際に何人分の患者が
-    // 含まれているかで判定する（presentPatients は全体件数なので、絞り込み後も
-    // 「複数患者の」と誤指示してしまうことがあった）
-    const patientPhrase = anonLabels.size > 1 ? "複数患者の" : "同一患者の";
-    const sessionsForPrompt = sheetResults.map((r) => ({
-      患者ID: anonLabels.get(r.patientId ?? `__unresolved_${r.id}`),
-      セッション: r.shortLabel,
-      PRR積算量合計_L: Number(r.totalPrrVolumeL.toFixed(4)),
-      最大ΔBV低下率: r.hasDbv && r.minDbv !== null ? Number(r.minDbv.toFixed(1)) : null,
-      総除水量_L: r.hasUf ? Number(r.totalUfVolumeL.toFixed(2)) : null,
-      収縮期血圧低下量_mmHg: r.hasBp ? r.sysDrop : null,
-      ΔBVとPRRの相関係数: r.hasDbv ? r.corrDbvPrr : null,
-      除水速度とPRRの相関係数: r.hasUf ? r.corrUfPrr : null,
-    }));
-
-    const prompt = `あなたは血液透析（除水・血漿再充填ダイナミクス）データを専門的にレビューする臨床工学技士です。
-以下は${patientPhrase}複数回の透析セッションから抽出した数値データです（実施日時の昇順）。
-${patientPhrase === "複数患者の" ? "各セッションの「患者ID」で患者ごとの傾向の違いにも注意してください。\n" : ""}このデータのみをもとに、下記の観点から詳細かつ専門的に分析してください。
-
-【分析してほしい観点】
-1. PRR（血漿再充填）・ΔBV（血液濃縮）の全体的な傾向と、セッションを追うごとの経時的な変化
-2. セッション間のばらつきとその要因として考えられること
-3. 除水速度・除水量とΔBV/PRRの関係性から読み取れる血漿再充填能力の評価
-4. 血圧低下とΔBVの関連から示唆される循環動態への影響
-5. データ上、特に注意が必要と考えられるセッション・時間帯とその根拠
-6. 次回以降の透析条件設定（除水速度・除水プログラムなど）を検討する上での実務的な示唆
-
-【出力形式】
-- 見出し付きのMarkdown形式で、日本語で詳細に記述してください
-- 数値の正常/異常を医学的に断定せず、あくまで「データの傾向として読み取れること」として記述してください
-- 診断や治療方針の決定はできない旨を踏まえつつ、臨床工学技士が次回の設定検討に使える実務的な視点でまとめてください
-
-セッションデータ（JSON）:
-${JSON.stringify(sessionsForPrompt, null, 2)}
-
-用語補足:
-- PRR積算量合計: 血漿再充填の推定量（治療中の合計、単位L）
-- 最大ΔBV低下率: 血液量減少の最大値（マイナスが大きいほど濃縮）
-- ΔBVとPRRの相関: 負の相関が強いほど、除水に対して血漿再充填が追いついていない可能性
-- 除水速度とPRRの相関: 除水速度の変化とPRRの連動性`;
-
-    setGeneratedPrompt(prompt);
-    setCopyStatus("idle");
+  // 印刷レポートのヘッダーに出す対象期間（ファイル名から日時が取れたセッションの最初〜最後）
+  const reportPeriodLabel = useMemo(() => {
+    const ts = sheetResults.map((r) => r.sessionTimestamp).filter((t) => t !== null && t !== undefined);
+    if (ts.length === 0) return "不明";
+    const fmt = (t) => new Date(t).toLocaleDateString("ja-JP");
+    const from = fmt(Math.min(...ts));
+    const to = fmt(Math.max(...ts));
+    return from === to ? from : `${from} 〜 ${to}`;
   }, [sheetResults]);
+
+  const [generatedPrompt, setGeneratedPrompt] = useState(null);
+  const [showPrompt, setShowPrompt] = useState(false);
+  const [copyStatus, setCopyStatus] = useState("idle"); // "idle" | "copied"
+  // Claude.aiを開いた結果: null | "prefilled"(入力欄に自動入力) | "paste"(貼り付けが必要) | "paste-manual"(コピーも失敗)
+  const [claudeStatus, setClaudeStatus] = useState(null);
+
+  // 絞り込み中のセッションが変わったら、古いプロンプト・案内は消す
+  React.useEffect(() => {
+    setGeneratedPrompt(null);
+    setShowPrompt(false);
+    setClaudeStatus(null);
+  }, [sheetResults]);
+
+  const buildAnalysisPrompt = useCallback(() => buildClaudeAnalysisPrompt(sheetResults), [sheetResults]);
+
+  const writeClipboard = (text) => {
+    try {
+      return navigator.clipboard.writeText(text).then(
+        () => true,
+        () => false
+      );
+    } catch (e) {
+      return Promise.resolve(false);
+    }
+  };
+
+  // Claude.ai を新しいタブで開き、分析プロンプトを入力欄に入れる。
+  // APIキーは使わず、ユーザー自身のClaude.aiアカウントで分析する（GitHub Pagesでも動作）。
+  const analyzeWithClaude = useCallback(() => {
+    const prompt = buildAnalysisPrompt();
+    setGeneratedPrompt(prompt);
+    const prefillUrl = `${CLAUDE_NEW_CHAT_URL}?q=${encodeURIComponent(prompt)}`;
+    const canPrefill = prefillUrl.length <= CLAUDE_PREFILL_URL_MAX;
+    // クリップボードへの書き込みはタブ切り替え前（このページにフォーカスがあるうち）に開始する。
+    // 自動入力できた場合も、念のためコピーしておく。
+    const copied = writeClipboard(prompt);
+    // ポップアップブロックを避けるため、window.open はクリック処理の中で同期的に呼ぶ
+    window.open(canPrefill ? prefillUrl : CLAUDE_NEW_CHAT_URL, "_blank", "noopener,noreferrer");
+    if (canPrefill) {
+      setClaudeStatus("prefilled");
+    } else {
+      setClaudeStatus("paste");
+      copied.then((ok) => {
+        if (!ok) {
+          setClaudeStatus("paste-manual");
+          setShowPrompt(true);
+        }
+      });
+    }
+  }, [buildAnalysisPrompt]);
+
+  const togglePrompt = useCallback(() => {
+    if (!showPrompt && !generatedPrompt) setGeneratedPrompt(buildAnalysisPrompt());
+    setShowPrompt((v) => !v);
+    setCopyStatus("idle");
+  }, [showPrompt, generatedPrompt, buildAnalysisPrompt]);
 
   const copyPrompt = useCallback(async () => {
     if (!generatedPrompt) return;
-    try {
-      await navigator.clipboard.writeText(generatedPrompt);
+    if (await writeClipboard(generatedPrompt)) {
       setCopyStatus("copied");
       setTimeout(() => setCopyStatus("idle"), 2000);
-    } catch (e) {
-      console.error("Clipboard copy error:", e);
     }
   }, [generatedPrompt]);
 
@@ -1257,13 +1400,24 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
             {/* 詳細パネル */}
             {active && activeBase && (
               <div className="report-print-area" style={{ flex: 1, minWidth: 380, display: "flex", flexDirection: "column" }}>
-                <div className="print-only" style={{ order: -30, marginBottom: 14 }}>
-                  <div style={{ fontSize: 18, fontWeight: 700, color: "#111827" }}>透析 BV / PRR 分析レポート</div>
-                  <div style={{ fontSize: 12, color: "#374151", marginTop: 4 }}>
-                    ファイル: {active.filename} ／ 抽出範囲: {active.startLabel} 〜 {active.endLabel} ／ 作成日時:{" "}
-                    {new Date().toLocaleString("ja-JP")}
-                  </div>
-                </div>
+                <ReportHeader
+                  style={{ order: -30 }}
+                  title="透析 BV / PRR 分析レポート"
+                  subtitle="個別セッション"
+                  meta={[
+                    ["患者", active.patientLabel],
+                    [
+                      "実施日",
+                      active.sessionTimestamp
+                        ? `${new Date(active.sessionTimestamp).toLocaleDateString("ja-JP")}${
+                            active.weekdayLabel ? `（${active.weekdayLabel}）` : ""
+                          }`
+                        : "不明",
+                    ],
+                    ["抽出範囲", `${active.startLabel} 〜 ${active.endLabel}`],
+                    ["ファイル", active.filename],
+                  ]}
+                />
                 {/* 抽出範囲の手動調整 */}
                 <div
                   className="no-print"
@@ -1958,6 +2112,7 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
                           dataKey="x"
                           name="ΔBV(%)"
                           tick={{ fill: "#FFFFFF", fontSize: 10.5 }}
+                          tickFormatter={(v) => (typeof v === "number" ? v.toFixed(1) : v)}
                           stroke="#1B2536"
                           domain={tripleXDomain}
                           allowDataOverflow
@@ -1968,6 +2123,7 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
                           dataKey="y"
                           name="PRR瞬時値[L/h]"
                           tick={{ fill: "#FFFFFF", fontSize: 10.5 }}
+                          tickFormatter={(v) => (typeof v === "number" ? v.toFixed(2) : v)}
                           stroke="#1B2536"
                           domain={tripleYDomain}
                           allowDataOverflow
@@ -1994,6 +2150,8 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
                     </ResponsiveContainer>
                   </div>
                 )}
+
+                <ReportFooter style={{ order: 99 }} />
 
                 {/* ダウンロード */}
                 <div className="no-print" style={{ order: 100, display: "flex", gap: 10, flexWrap: "wrap" }}>
@@ -2043,12 +2201,16 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
 
         {results.length > 1 && viewMode === "compare" && (
           <div className="report-print-area" style={{ marginTop: 20 }}>
-            <div className="print-only" style={{ marginBottom: 14 }}>
-              <div style={{ fontSize: 18, fontWeight: 700, color: "#111827" }}>透析 BV / PRR 分析レポート（比較ビュー）</div>
-              <div style={{ fontSize: 12, color: "#374151", marginTop: 4 }}>
-                {scopeLabel} ／ 対象 {sheetResults.length} 件 ／ 作成日時: {new Date().toLocaleString("ja-JP")}
-              </div>
-            </div>
+            <ReportHeader
+              title="透析 BV / PRR 分析レポート"
+              subtitle="複数セッションの比較"
+              meta={[
+                ["対象患者", overallPatient === "all" ? `全患者（${new Set(sheetResults.map((r) => r.patientLabel)).size}名）` : overallPatient],
+                ["対象曜日", overallSheet === "all" ? "全曜日" : `${overallSheet}曜日`],
+                ["対象期間", reportPeriodLabel],
+                ["セッション数", `${sheetResults.length} 件`],
+              ]}
+            />
 
             <ScopeTabs
               presentPatients={presentPatients}
@@ -2070,10 +2232,11 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
                 overflowX: "auto",
               }}
             >
-              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
+              <table className="report-table" style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
                 <thead>
                   <tr style={{ color: "#647089", textAlign: "left" }}>
                     <th style={{ padding: "6px 10px", fontWeight: 500 }}>ファイル</th>
+                    {compareShowsPatient && <th style={{ padding: "6px 10px", fontWeight: 500 }}>患者</th>}
                     <th style={{ padding: "6px 10px", fontWeight: 500 }}>開始</th>
                     <th style={{ padding: "6px 10px", fontWeight: 500 }}>終了</th>
                     <th style={{ padding: "6px 10px", fontWeight: 500 }}>最大ΔBV低下</th>
@@ -2086,29 +2249,27 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
                 <tbody>
                   {sheetResults.map((r, i) => (
                     <tr key={r.id} style={{ borderTop: "1px solid #1B2536" }}>
-                      <td style={{ padding: "8px 10px", display: "flex", alignItems: "center", gap: 8 }}>
-                        <span
-                          style={{
-                            width: 8,
-                            height: 8,
-                            borderRadius: "50%",
-                            background: colorFor(i),
-                            flexShrink: 0,
-                          }}
-                        />
-                        <span
-                          style={{
-                            fontFamily: "'IBM Plex Mono',monospace",
-                            whiteSpace: "nowrap",
-                            overflow: "hidden",
-                            textOverflow: "ellipsis",
-                            maxWidth: 160,
-                          }}
-                          title={r.filename}
-                        >
-                          {r.shortLabel}
-                        </span>
+                      <td style={{ padding: "8px 10px" }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          {/* 印刷時は背景色が白に統一されるため、色見本はSVGのfillで描く */}
+                          <svg width="8" height="8" viewBox="0 0 8 8" style={{ flexShrink: 0 }} aria-hidden="true">
+                            <circle cx="4" cy="4" r="4" fill={colorFor(i)} />
+                          </svg>
+                          <span
+                            style={{
+                              fontFamily: "'IBM Plex Mono',monospace",
+                              whiteSpace: "nowrap",
+                              overflow: "hidden",
+                              textOverflow: "ellipsis",
+                              maxWidth: 160,
+                            }}
+                            title={r.filename}
+                          >
+                            {r.shortLabel}
+                          </span>
+                        </div>
                       </td>
+                      {compareShowsPatient && <td style={{ padding: "8px 10px" }}>{r.patientLabel}</td>}
                       <td style={{ padding: "8px 10px", fontFamily: "'IBM Plex Mono',monospace" }}>{r.startLabel}</td>
                       <td style={{ padding: "8px 10px", fontFamily: "'IBM Plex Mono',monospace" }}>{r.endLabel}</td>
                       <td style={{ padding: "8px 10px", fontFamily: "'IBM Plex Mono',monospace" }}>
@@ -2282,17 +2443,22 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
                 </ResponsiveContainer>
               </div>
             )}
+            <ReportFooter />
           </div>
         )}
 
         {results.length > 1 && viewMode === "overall" && (
           <div className="report-print-area" style={{ marginTop: 20 }}>
-            <div className="print-only" style={{ marginBottom: 14 }}>
-              <div style={{ fontSize: 18, fontWeight: 700, color: "#111827" }}>透析 BV / PRR 分析レポート（総合分析）</div>
-              <div style={{ fontSize: 12, color: "#374151", marginTop: 4 }}>
-                {scopeLabel} ／ 対象 {sheetResults.length} 件 ／ 作成日時: {new Date().toLocaleString("ja-JP")}
-              </div>
-            </div>
+            <ReportHeader
+              title="透析 BV / PRR 分析レポート"
+              subtitle="総合分析（セッション推移）"
+              meta={[
+                ["対象患者", overallPatient === "all" ? `全患者（${new Set(sheetResults.map((r) => r.patientLabel)).size}名）` : overallPatient],
+                ["対象曜日", overallSheet === "all" ? "全曜日" : `${overallSheet}曜日`],
+                ["対象期間", reportPeriodLabel],
+                ["セッション数", `${sheetResults.length} 件`],
+              ]}
+            />
 
             <ScopeTabs
               presentPatients={presentPatients}
@@ -2303,52 +2469,97 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
               selectSheet={selectSheet}
             />
 
-            {/* AI総合分析用プロンプト生成 */}
+            {/* Claude.ai で総合分析 */}
             <div
               className="no-print"
               style={{
-                background: "linear-gradient(135deg, rgba(45,212,191,0.06), rgba(15,118,110,0.03))",
-                border: "1px solid rgba(45,212,191,0.3)",
+                background: "linear-gradient(135deg, rgba(217,119,87,0.08), rgba(45,212,191,0.03))",
+                border: "1px solid rgba(217,119,87,0.35)",
                 borderRadius: 12,
                 padding: "16px 18px",
                 marginBottom: 20,
               }}
             >
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
-                <div>
-                  <div style={{ fontSize: 13.5, fontWeight: 600, color: "#5EEAD4", display: "flex", alignItems: "center", gap: 6 }}>
-                    <Activity size={15} />
-                    AI総合分析用プロンプト生成
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 13.5, fontWeight: 600, color: "#F0A585", display: "flex", alignItems: "center", gap: 6 }}>
+                    <Sparkles size={15} />
+                    Claude で総合分析
                   </div>
                   <div style={{ fontSize: 11.5, color: "#8B9CB3", marginTop: 2 }}>
                     {overallPatient === "all" && overallSheet === "all"
-                      ? `読み込んだ${sheetResults.length}件のセッションから、専門的な分析を依頼するプロンプトを自動生成します`
-                      : `${scopeLabel}の${sheetResults.length}件のセッションから、専門的な分析を依頼するプロンプトを自動生成します`}
+                      ? `読み込んだ${sheetResults.length}件のセッションを、Claude.ai で専門的に分析します`
+                      : `${scopeLabel}の${sheetResults.length}件のセッションを、Claude.ai で専門的に分析します`}
                   </div>
                 </div>
-                <button
-                  onClick={generateAnalysisPrompt}
-                  style={{
-                    background: "#0F766E",
-                    color: "#E7ECF3",
-                    border: "none",
-                    borderRadius: 9,
-                    padding: "9px 16px",
-                    fontSize: 12.5,
-                    fontWeight: 500,
-                    cursor: "pointer",
-                    whiteSpace: "nowrap",
-                  }}
-                >
-                  {generatedPrompt ? "プロンプトを再生成" : "分析用プロンプトを生成"}
-                </button>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  <button
+                    onClick={togglePrompt}
+                    style={{
+                      background: "transparent",
+                      color: "#8B9CB3",
+                      border: "1px solid #2A3548",
+                      borderRadius: 9,
+                      padding: "9px 14px",
+                      fontSize: 12.5,
+                      fontWeight: 500,
+                      cursor: "pointer",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {showPrompt ? "送る内容を閉じる" : "送る内容を確認"}
+                  </button>
+                  <button
+                    onClick={analyzeWithClaude}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 7,
+                      background: "#C96442",
+                      color: "#FFFFFF",
+                      border: "none",
+                      borderRadius: 9,
+                      padding: "9px 16px",
+                      fontSize: 12.5,
+                      fontWeight: 600,
+                      cursor: "pointer",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    <ExternalLink size={14} />
+                    Claude.ai で分析する
+                  </button>
+                </div>
               </div>
 
-              {generatedPrompt && (
+              {claudeStatus && (
+                <div
+                  role="status"
+                  style={{
+                    marginTop: 14,
+                    fontSize: 12,
+                    lineHeight: 1.7,
+                    color: claudeStatus === "prefilled" ? "#5EEAD4" : "#FBBF24",
+                    background: claudeStatus === "prefilled" ? "rgba(45,212,191,0.08)" : "rgba(245,158,11,0.08)",
+                    border: `1px solid ${claudeStatus === "prefilled" ? "rgba(45,212,191,0.3)" : "rgba(245,158,11,0.3)"}`,
+                    borderRadius: 8,
+                    padding: "9px 12px",
+                  }}
+                >
+                  {claudeStatus === "prefilled" &&
+                    "Claude.ai を新しいタブで開きました。入力欄に分析依頼が入っているので、内容を確認して送信してください。（入っていない場合は、クリップボードにもコピーしてあるので貼り付けてください）"}
+                  {claudeStatus === "paste" &&
+                    "データ量が多いため、入力欄への自動入力はせずに Claude.ai を開きました。分析依頼はクリップボードにコピーしてあるので、入力欄に貼り付け（Ctrl+V / ⌘V）て送信してください。"}
+                  {claudeStatus === "paste-manual" &&
+                    "Claude.ai を開きましたが、クリップボードへのコピーができませんでした。下の内容をすべて選択してコピーし、Claude.ai の入力欄に貼り付けてください。"}
+                </div>
+              )}
+
+              {showPrompt && generatedPrompt && (
                 <div style={{ marginTop: 16 }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, marginBottom: 6 }}>
                     <div style={{ fontSize: 11.5, color: "#8B9CB3" }}>
-                      このプロンプトをコピーして、ChatGPTやClaudeなどのAIチャットに貼り付けるだけで専門的な詳細分析が得られます
+                      Claude.ai に送られる内容です（患者名は仮名、数値はセッションごとの集計値のみ）
                     </div>
                     <button
                       onClick={copyPrompt}
@@ -2395,7 +2606,10 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
               )}
 
               <div style={{ marginTop: 12, fontSize: 10, color: "#4A5670", lineHeight: 1.6 }}>
-                ※ 生成されるのはAIへの分析依頼文であり、医学的診断や治療方針の決定ではありません。実際の対応は必ず医療スタッフの判断で行ってください。
+                ※ 分析には Claude.ai へのログインが必要です。送られるのはセッションごとの集計値だけで、患者名は「患者A」などの仮名に置き換えています（グラフの元データや実名は送りません）。
+                外部サービスへのデータ送信は施設のルールに従ってください。
+                <br />
+                ※ Claude の回答はデータの傾向の読み取りであり、医学的診断や治療方針の決定ではありません。実際の対応は必ず医療スタッフの判断で行ってください。
               </div>
             </div>
 
@@ -2577,6 +2791,7 @@ ${JSON.stringify(sessionsForPrompt, null, 2)}
                 </>
               );
             })()}
+            <ReportFooter />
           </div>
         )}
 

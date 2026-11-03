@@ -13,19 +13,41 @@
       .print-only {
         display: none;
       }
-      @media print {
-        body * {
-          visibility: hidden;
+      @page {
+        size: A4 portrait;
+        margin: 12mm 11mm 14mm;
+        @bottom-center {
+          content: "BV / PRR 分析レポート  ―  " counter(page) " / " counter(pages);
+          font-family: "Hiragino Sans", "Noto Sans JP", "Yu Gothic", sans-serif;
+          font-size: 8pt;
+          color: #94a3b8;
         }
-        .report-print-area,
-        .report-print-area * {
-          visibility: visible;
+      }
+      @media print {
+        html,
+        body {
+          background: #ffffff !important;
+          -webkit-print-color-adjust: exact;
+          print-color-adjust: exact;
+        }
+        /* レポート領域とその祖先以外は描画しない（visibility:hidden だと高さが残り空白ページが出るため display:none） */
+        body *:not(.report-print-area):not(.report-print-area *):not(:has(.report-print-area)) {
+          display: none !important;
+        }
+        /* 祖先ラッパーの画面用の余白・幅制限・横並びを解除 */
+        body *:has(.report-print-area) {
+          padding: 0 !important;
+          margin: 0 !important;
+          max-width: none !important;
+          min-height: 0 !important;
+          display: block !important;
+          background: #ffffff !important;
         }
         .report-print-area {
-          position: absolute;
-          left: 0;
-          top: 0;
-          width: 100%;
+          width: 100% !important;
+          min-width: 0 !important;
+          margin: 0 !important;
+          font-size: 10pt;
         }
         .report-print-area .no-print {
           display: none !important;
@@ -35,12 +57,77 @@
         }
         .report-print-area,
         .report-print-area * {
-          background: #ffffff !important;
           background-color: #ffffff !important;
           background-image: none !important;
           box-shadow: none !important;
-          color: #111827 !important;
-          border-color: #cbd5e1 !important;
+          color: #1f2937 !important;
+          border-color: #d5dde8 !important;
+        }
+        /* 印刷用ヘッダーのアクセント（上の一括白背景より優先させる） */
+        .report-print-area .report-accent,
+        .report-print-area .report-accent * {
+          color: #0f766e !important;
+        }
+        .report-print-area .report-rule {
+          background-color: #0f766e !important;
+        }
+        .report-print-area .report-meta-cell {
+          background-color: #f4f7fa !important;
+        }
+        .report-print-area .report-meta-cell * {
+          background-color: transparent !important;
+        }
+        /* 統計カード・グラフ・表はページをまたいで分割しない */
+        .report-print-area > div,
+        .report-print-area table,
+        .report-print-area tr,
+        .report-print-area .recharts-responsive-container {
+          break-inside: avoid;
+          page-break-inside: avoid;
+        }
+        .report-print-area .report-table {
+          font-size: 7.5pt !important;
+        }
+        .report-print-area *:has(> .report-table) {
+          overflow: visible !important;
+        }
+        .report-print-area .report-table th,
+        .report-print-area .report-table td {
+          padding: 4px 5px !important;
+          white-space: nowrap;
+          vertical-align: middle;
+          border-bottom: 1px solid #e2e8f0;
+        }
+        .report-print-area .report-table th {
+          white-space: normal;
+          font-weight: 600 !important;
+          background-color: #f4f7fa !important;
+        }
+        .report-print-area thead {
+          display: table-header-group;
+        }
+        /* 画面幅で描画済みのグラフを用紙幅に縮小して収める（SVGはviewBox付きなので比率を保って縮む） */
+        .report-print-area .recharts-responsive-container,
+        .report-print-area .recharts-wrapper {
+          width: 100% !important;
+          height: auto !important;
+        }
+        .report-print-area .recharts-wrapper > svg.recharts-surface {
+          width: 100% !important;
+          height: auto !important;
+        }
+        .report-print-area .recharts-legend-wrapper {
+          position: static !important;
+          width: 100% !important;
+        }
+        /* 画面(暗背景)用に白で描いている目盛り・軸ラベルは白い紙では見えないため灰色にする */
+        .report-print-area svg text[fill="#FFFFFF" i],
+        .report-print-area svg text[fill="#FFF" i],
+        .report-print-area svg text[fill="white" i] {
+          fill: #475569 !important;
+        }
+        .report-print-area .recharts-tooltip-wrapper {
+          display: none !important;
         }
       }
     </style>
