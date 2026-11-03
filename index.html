@@ -13,6 +13,13 @@
       .print-only {
         display: none;
       }
+      @keyframes bvprr-pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.35; }
+      }
+      .bvprr-pulse {
+        animation: bvprr-pulse 1.4s ease-in-out infinite;
+      }
       @page {
         size: A4 portrait;
         margin: 12mm 11mm 14mm;
@@ -103,6 +110,11 @@
           font-weight: 600 !important;
           background-color: #f4f7fa !important;
         }
+        /* Claudeの分析結果は長くなるのでページをまたいでよい */
+        .report-print-area > .report-analysis {
+          break-inside: auto;
+          page-break-inside: auto;
+        }
         .report-print-area thead {
           display: table-header-group;
         }
@@ -131,7 +143,7 @@
         }
       }
     </style>
-    <script type="module" crossorigin src="/bv-prr-tool/assets/index-AXmvlI3s.js"></script>
+    <script type="module" crossorigin src="/bv-prr-tool/assets/index-C0_teIlM.js"></script>
   </head>
   <body>
     <div id="root"></div>
